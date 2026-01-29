@@ -45,7 +45,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         logger.info(f"Loaded {len(self.supported_speakers)} supported speakers: {sorted(self.supported_speakers)}")
 
     def _load_supported_speakers(self) -> set[str]:
-        """Load supported speakers from the model configuration."""
+        """Load supported speakers (case-insensitive) from the model configuration."""
         try:
             talker_config = self.engine_client.model_config.hf_config.talker_config
 
@@ -53,7 +53,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             for attr_name in ["spk_id", "speaker_id"]:
                 speakers_dict = getattr(talker_config, attr_name, None)
                 if speakers_dict and isinstance(speakers_dict, dict):
-                    return set(speakers_dict.keys())
+                    # Normalize to lowercase for case-insensitive matching
+                    return {speaker.lower() for speaker in speakers_dict.keys()}
 
             logger.warning("No speakers found in talker_config (checked spk_id and speaker_id)")
         except Exception as e:
@@ -75,8 +76,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """Validate TTS request parameters. Returns error message or None."""
         task_type = request.task_type or "CustomVoice"
 
-        # voices are always case-insensitive
-        request.voice = request.voice.lower()
+        # Normalize voice to lowercase for case-insensitive matching
+        if request.voice is not None:
+            request.voice = request.voice.lower()
 
         # Validate input is not empty
         if not request.input or not request.input.strip():
@@ -137,8 +139,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Text content (always required)
         params["text"] = [request.input]
-        # voices are always case-insensitive
-        request.voice = request.voice.lower()
+
+        # Normalize voice to lowercase for case-insensitive matching
+        if request.voice is not None:
+            request.voice = request.voice.lower()
 
         # Task type
         if request.task_type is not None:
