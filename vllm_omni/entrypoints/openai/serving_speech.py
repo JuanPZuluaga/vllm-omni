@@ -19,17 +19,6 @@ logger = init_logger(__name__)
 
 # TTS Configuration (currently supports Qwen3-TTS)
 _TTS_MODEL_STAGES: set[str] = {"qwen3_tts"}
-_TTS_SPEAKERS: set[str] = {
-    "Vivian",
-    "Serena",
-    "Uncle_Fu",
-    "Dylan",
-    "Eric",
-    "Ryan",
-    "Aiden",
-    "Ono_Anna",
-    "Sohee",
-}
 _TTS_LANGUAGES: set[str] = {
     "Auto",
     "Chinese",
@@ -49,6 +38,29 @@ _TTS_MAX_NEW_TOKENS_MAX = 4096
 
 
 class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Load supported speakers
+        self.supported_speakers = self._load_supported_speakers()
+        logger.info(f"Loaded {len(self.supported_speakers)} supported speakers: {sorted(self.supported_speakers)}")
+
+    def _load_supported_speakers(self) -> set[str]:
+        """Load supported speakers from the model configuration."""
+        try:
+            talker_config = self.engine_client.model_config.hf_config.talker_config
+
+            # Check for speakers in either spk_id or speaker_id
+            for attr_name in ["spk_id", "speaker_id"]:
+                speakers_dict = getattr(talker_config, attr_name, None)
+                if speakers_dict and isinstance(speakers_dict, dict):
+                    return set(speakers_dict.keys())
+
+            logger.warning("No speakers found in talker_config (checked spk_id and speaker_id)")
+        except Exception as e:
+            logger.warning(f"Could not load speakers from model config: {e}")
+
+        return set()
+
     def _is_tts_model(self) -> bool:
         """Check if the current model is a supported TTS model."""
         stage_list = getattr(self.engine_client, "stage_list", None)
@@ -63,6 +75,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """Validate TTS request parameters. Returns error message or None."""
         task_type = request.task_type or "CustomVoice"
 
+        # voices are always case-insensitive
+        request.voice = request.voice.lower()
+
         # Validate input is not empty
         if not request.input or not request.input.strip():
             return "Input text cannot be empty"
@@ -73,8 +88,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Validate speaker for CustomVoice task
         if task_type == "CustomVoice" and request.voice is not None:
-            if request.voice not in _TTS_SPEAKERS:
-                return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(_TTS_SPEAKERS))}"
+            if request.voice not in self.supported_speakers:
+                return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
         # Validate Base task requirements
         if task_type == "Base":
@@ -122,6 +137,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Text content (always required)
         params["text"] = [request.input]
+        # voices are always case-insensitive
+        request.voice = request.voice.lower()
 
         # Task type
         if request.task_type is not None:
