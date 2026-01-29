@@ -774,10 +774,7 @@ async def list_voices(raw_request: Request):
     """List available TTS voices/speakers from the loaded model."""
     handler = Omnispeech(raw_request)
     if handler is None:
-        return JSONResponse(
-            status_code=HTTPStatus.NOT_FOUND.value,
-            content={"error": "The model does not support Speech API"},
-        )
+        return base(raw_request).create_error_response(message="The model does not support Speech API")
 
     speakers = sorted(handler.supported_speakers) if handler.supported_speakers else []
     return JSONResponse(content={"voices": speakers})

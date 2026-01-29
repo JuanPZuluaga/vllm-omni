@@ -342,3 +342,26 @@ class TestTTSMethods:
         assert params["speaker"] == ["Ryan"]
         assert params["language"] == ["English"]
         assert params["task_type"] == ["CustomVoice"]
+
+    def test_load_supported_speakers(self):
+        """Test _load_supported_speakers."""
+        mock_engine_client = MagicMock()
+        mock_engine_client.errored = False
+        mock_engine_client.stage_list = None
+
+        # Mock talker_config with mixed-case speaker names
+        mock_talker_config = MagicMock()
+        mock_talker_config.spk_id = {"Ryan": 0, "Vivian": 1, "Aiden": 2}
+        mock_engine_client.model_config.hf_config.talker_config = mock_talker_config
+
+        mock_models = MagicMock()
+        mock_models.is_base_model.return_value = True
+
+        server = OmniOpenAIServingSpeech(
+            engine_client=mock_engine_client,
+            models=mock_models,
+            request_logger=MagicMock(),
+        )
+
+        # Verify speakers are normalized to lowercase
+        assert server.supported_speakers == {"ryan", "vivian", "aiden"}

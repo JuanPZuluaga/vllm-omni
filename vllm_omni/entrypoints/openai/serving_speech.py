@@ -90,7 +90,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Validate speaker for CustomVoice task
         if task_type == "CustomVoice" and request.voice is not None:
-            if request.voice not in self.supported_speakers:
+            if self.supported_speakers and request.voice not in self.supported_speakers:
                 return f"Invalid speaker '{request.voice}'. Supported: {', '.join(sorted(self.supported_speakers))}"
 
         # Validate Base task requirements
@@ -139,10 +139,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Text content (always required)
         params["text"] = [request.input]
-
-        # Normalize voice to lowercase for case-insensitive matching
-        if request.voice is not None:
-            request.voice = request.voice.lower()
 
         # Task type
         if request.task_type is not None:
