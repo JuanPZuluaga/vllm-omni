@@ -220,7 +220,6 @@ class OrchestratorAggregator:
         stage_id: int,
         request_id: str,
     ) -> None:
-<<<<<<< HEAD
         try:
             if (
                 output_to_yield.final_output_type == "audio"
@@ -314,29 +313,6 @@ class OrchestratorAggregator:
                 stage_id,
                 req_id,
             )
-=======
-        if (
-            output_to_yield.final_output_type == "audio"
-            and finished
-            and (multimodal_output := output_to_yield.multimodal_output.get("audio")) is not None
-        ):
-            nframes = sum(
-                int(t.shape[0])
-                for t in (multimodal_output if isinstance(multimodal_output, list) else [multimodal_output])
-            )
-            stage_events_for_req = self.stage_events.get(request_id, [])
-            if stage_events_for_req:
-                for stage_event in stage_events_for_req:
-                    if stage_event.stage_id == stage_id:
-                        stage_event.audio_generated_frames += nframes
-                        break
-            else:
-                logger.warning(
-                    "Failed to record audio generated frames for request %s at stage %s: no stage event found",
-                    request_id,
-                    stage_id,
-                )
->>>>>>> 904cdb5 (support multiaudio,codex)
 
     def _as_stage_request_stats(
         self,
