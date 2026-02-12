@@ -1515,7 +1515,6 @@ class Qwen3TTSTokenizerV1Model(Qwen3TTSTokenizerV1PreTrainedModel):
         audio_codes = torch.clamp(audio_codes, min=0)
         audio_values = self.decoder(code=audio_codes, reference_mel=ref_mels, conditioning=xvectors)
 
-        audio_lengths = (audio_codes > 0).sum(1) * self.decode_upsample_rate
         audio_values = [a[:length] for a, length in zip(audio_values, audio_lengths)]
 
         if not return_dict:
