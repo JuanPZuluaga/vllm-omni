@@ -126,7 +126,7 @@ class Qwen3TTSCode2Wav(nn.Module):
                 for s in slices:
                     n = s if isinstance(s, int) else (s.token_slice.stop - s.token_slice.start)
                     boundaries.append(boundaries[-1] + n)
-                return [ids[boundaries[i]:boundaries[i + 1]] for i in range(len(boundaries) - 1)]
+                return [ids[boundaries[i] : boundaries[i + 1]] for i in range(len(boundaries) - 1)]
         return [ids]
 
     @torch.no_grad()
@@ -185,7 +185,8 @@ class Qwen3TTSCode2Wav(nn.Module):
                     logger.warning(
                         "Code2Wav input_ids length %d not divisible by num_quantizers %d, "
                         "likely a warmup run; returning empty audio.",
-                        n, q,
+                        n,
+                        q,
                     )
                 parsed.append((0, 0))
                 continue
@@ -212,8 +213,11 @@ class Qwen3TTSCode2Wav(nn.Module):
                 c = valid_codes[0]["audio_codes"]
                 logger.info(
                     "Code2Wav codec: frames=%d q=%d uniq=%d range=[%d,%d] head=%s batch=%d",
-                    c.shape[0], q, int(torch.unique(c).numel()),
-                    int(c.min().item()), int(c.max().item()),
+                    c.shape[0],
+                    q,
+                    int(torch.unique(c).numel()),
+                    int(c.min().item()),
+                    int(c.max().item()),
                     c[: min(2, c.shape[0]), : min(8, q)].cpu().tolist(),
                     len(valid_codes),
                 )
