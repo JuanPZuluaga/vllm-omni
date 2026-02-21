@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from dataclasses import fields
 from typing import Any, Literal, cast
 
-from vllm import PromptType, RequestOutput
 from vllm.inputs import TextPrompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -31,6 +30,7 @@ from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
+from vllm import PromptType, RequestOutput
 from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.distributed.omni_connectors import build_stage_connectors
 from vllm_omni.distributed.omni_connectors.adapter import try_recv_via_connector
