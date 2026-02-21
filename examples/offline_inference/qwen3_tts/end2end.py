@@ -262,19 +262,18 @@ def main(args):
     model_name = query_result.model_name
 
     # Load prompts from text file if provided.
+    # Use the default query as a template so task-specific fields
+    # (e.g. ref_audio for Base) are preserved; only override text.
     if args.txt_prompts:
         with open(args.txt_prompts) as f:
             lines = [line.strip() for line in f if line.strip()]
+        template = query_result.inputs
+        if isinstance(template, list):
+            template = template[0]
+        template_info = template["additional_information"]
         inputs = []
         for text in lines:
-            additional_information = {
-                "task_type": [args.query_type],
-                "text": [text],
-                "language": ["Auto"],
-                "speaker": ["Vivian"],
-                "instruct": [""],
-                "max_new_tokens": [2048],
-            }
+            additional_information = {**template_info, "text": [text]}
             inputs.append(
                 {
                     "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
