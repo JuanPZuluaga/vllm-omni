@@ -248,6 +248,13 @@ def main(args):
     Args:
         args: Parsed CLI args from parse_args().
     """
+    if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0:
+        raise ValueError(
+            f"--batch-size must be a power of two (got {args.batch_size}); "
+            "non-power-of-two values do not align with CUDA graph capture sizes "
+            "of Code2Wav."
+        )
+
     query_func = query_map[args.query_type]
     if args.query_type in {"CustomVoice", "VoiceDesign"}:
         query_result = query_func(use_batch_sample=args.use_batch_sample)
@@ -298,8 +305,7 @@ def main(args):
     batch_size = args.batch_size
     for batch_start in range(0, len(inputs), batch_size):
         batch = inputs[batch_start : batch_start + batch_size]
-        batch_input = batch[0] if len(batch) == 1 else batch
-        omni_generator = omni.generate(batch_input, sampling_params_list=None)
+        omni_generator = omni.generate(batch, sampling_params_list=None)
         for stage_outputs in omni_generator:
             for output in stage_outputs.request_output:
                 request_id = output.request_id
