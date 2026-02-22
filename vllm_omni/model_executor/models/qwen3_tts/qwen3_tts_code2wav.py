@@ -155,6 +155,7 @@ class Qwen3TTSCode2Wav(nn.Module):
         """
         self._ensure_speech_tokenizer_loaded()
         assert self._num_quantizers is not None
+        assert self._decode_upsample_rate is not None
         assert self._output_sample_rate is not None
 
         tok = self._speech_tokenizer
