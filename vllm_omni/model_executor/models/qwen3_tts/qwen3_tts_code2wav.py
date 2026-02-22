@@ -121,11 +121,10 @@ class Qwen3TTSCode2Wav(nn.Module):
         """Split concatenated input_ids into per-request segments using forward context."""
         if is_forward_context_available():
             slices = get_forward_context().ubatch_slices
-            if slices is not None and len(slices) > 1:
+            if slices is not None and len(slices) > 1 and not any(hasattr(s, "token_slice") for s in slices):
                 boundaries = [0]
                 for s in slices:
-                    n = s if isinstance(s, int) else (s.token_slice.stop - s.token_slice.start)
-                    boundaries.append(boundaries[-1] + n)
+                    boundaries.append(boundaries[-1] + s)
                 return [ids[boundaries[i] : boundaries[i + 1]] for i in range(len(boundaries) - 1)]
         return [ids]
 
