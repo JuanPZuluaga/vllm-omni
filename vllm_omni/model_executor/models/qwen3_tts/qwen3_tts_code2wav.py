@@ -118,7 +118,15 @@ class Qwen3TTSCode2Wav(nn.Module):
         return None
 
     def _split_request_ids(self, ids: torch.Tensor) -> list[torch.Tensor]:
-        """Split concatenated input_ids into per-request segments using forward context."""
+        """
+        Split concatenated input_ids into per-request segments using forward context.
+
+        Uses ubatch_slices from forward context which contains either:
+        - int: number of tokens in the request
+        - slice object with token_slice attribute
+
+        Returns list of per-request id tensors, or [ids] if not in batched context.
+        """
         if is_forward_context_available():
             slices = get_forward_context().ubatch_slices
             if slices is not None and len(slices) > 1 and not any(hasattr(s, "token_slice") for s in slices):
@@ -244,7 +252,12 @@ class Qwen3TTSCode2Wav(nn.Module):
                 if cut < audio_np.shape[0]:
                     audio_np = audio_np[cut:]
                 else:
-                    continue  # context trim >= decoded length
+                    logger.warning(
+                        "Context trim %d >= decoded length %d; returning empty audio.",
+                        cut,
+                        audio_np.shape[0],
+                    )
+                    continue
             if audio_np.shape[0] > 0:
                 audios[idx] = torch.from_numpy(audio_np).to(dtype=torch.float32).reshape(-1)
 
