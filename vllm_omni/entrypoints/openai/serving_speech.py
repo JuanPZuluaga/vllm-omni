@@ -10,7 +10,7 @@ from urllib.request import urlopen
 import numpy as np
 import soundfile as sf
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -263,6 +263,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         else:
             params["max_new_tokens"] = [2048]
 
+        # VoiceDesign requires non_streaming_mode (match offline script behaviour).
+        # CustomVoice and Base rely on the model default (True and False respectively).
+        if params["task_type"][0] == "VoiceDesign":
+            params["non_streaming_mode"] = [True]
+
         return params
 
     async def create_speech(
@@ -286,7 +291,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         - ref_text: Transcript of reference audio (Base task)
         - x_vector_only_mode: Use speaker embedding only (Base task)
 
-        NOTE: Streaming audio generation is not currently supported.
+        Streaming is supported via stream=True with response_format='pcm'.
+        Each Code2Wav chunk is yielded as raw PCM bytes as soon as it is decoded.
         """
 
         error_check_ret = await self._check_model(request)
@@ -342,6 +348,70 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 output_modalities=["audio"],
             )
 
+            # Streaming path: response format is 'pcm'
+            if request.stream:
+
+                async def _generate_pcm_chunks():
+                    prev_count = 0
+                    sample_rate_val = 24000
+                    try:
+                        async for res in generator:
+                            audio_output = None
+                            if hasattr(res, "multimodal_output") and res.multimodal_output:
+                                audio_output = res.multimodal_output
+                            if not audio_output and hasattr(res, "request_output"):
+                                ro = res.request_output
+                                if ro and hasattr(ro, "multimodal_output"):
+                                    audio_output = ro.multimodal_output
+
+                            if not audio_output:
+                                continue
+
+                            audio_key = (
+                                "audio"
+                                if "audio" in audio_output
+                                else ("model_outputs" if "model_outputs" in audio_output else None)
+                            )
+                            if audio_key is None:
+                                continue
+
+                            audio_list = audio_output[audio_key]
+                            if not isinstance(audio_list, list):
+                                audio_list = [audio_list] if audio_list is not None else []
+
+                            sr_raw = audio_output.get("sr")
+                            if sr_raw is not None:
+                                sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+                                sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+
+                            new_chunks = audio_list[prev_count:]
+                            prev_count = len(audio_list)
+
+                            for chunk_tensor in new_chunks:
+                                if hasattr(chunk_tensor, "float"):
+                                    chunk_np = chunk_tensor.float().detach().cpu().numpy()
+                                else:
+                                    chunk_np = chunk_tensor
+                                if chunk_np.ndim > 1:
+                                    chunk_np = chunk_np.squeeze()
+                                audio_obj = CreateAudio(
+                                    audio_tensor=chunk_np,
+                                    sample_rate=sample_rate_val,
+                                    response_format="pcm",
+                                    speed=1.0,
+                                    stream_format="audio",
+                                    base64_encode=False,
+                                )
+                                audio_response: AudioResponse = self.create_audio(audio_obj)
+                                yield audio_response.audio_data
+                    except asyncio.CancelledError:
+                        logger.info("Streaming request %s cancelled by client", request_id)
+                    except Exception as e:
+                        logger.exception("Streaming speech generation failed for %s: %s", request_id, e)
+
+                return StreamingResponse(_generate_pcm_chunks(), media_type="audio/pcm")
+
+            # Non-streaming path:
             final_output: OmniRequestOutput | None = None
             async for res in generator:
                 final_output = res
@@ -371,11 +441,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 return self.create_error_response("TTS model did not produce audio output.")
 
             audio_tensor = audio_output[audio_key]
-            sample_rate = audio_output.get("sr", 24000)
-            if hasattr(sample_rate, "item"):
-                sample_rate = sample_rate.item()
+            sr_raw = audio_output.get("sr", 24000)
+            sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+            sample_rate = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
 
-            # Streaming accumulates chunks as a list; concat first.
+            # async_chunk mode accumulates chunks as a list; concat first.
             if isinstance(audio_tensor, list):
                 import torch
 
@@ -390,7 +460,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             audio_obj = CreateAudio(
                 audio_tensor=audio_tensor,
-                sample_rate=int(sample_rate),
+                sample_rate=sample_rate,
                 response_format=request.response_format or "wav",
                 speed=request.speed or 1.0,
                 stream_format=request.stream_format,
