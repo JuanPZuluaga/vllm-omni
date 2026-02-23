@@ -261,7 +261,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
     @staticmethod
     def _extract_audio_output(res) -> tuple[dict | None, str | None]:
-        """Return (audio_output dict, audio key) or (None, None)."""
+        """Return (audio_output dict, audio key) or (None, None).
+
+        Returns the raw dict so callers can apply their own extraction strategy:
+        streaming needs per-chunk delta slicing; non-streaming needs full concatenation.
+        """
         mm = getattr(res, "multimodal_output", None)
         if not mm:
             ro = getattr(res, "request_output", None)
