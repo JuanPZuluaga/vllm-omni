@@ -17,7 +17,6 @@ from vllm.utils import random_uuid
 
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import (
-    AudioResponse,
     CreateAudio,
     OpenAICreateSpeechRequest,
 )
@@ -216,6 +215,18 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         wav_np, sr = await loop.run_in_executor(None, _fetch_sync)
         return wav_np.tolist(), sr
 
+    @staticmethod
+    def _extract_audio_output(res) -> tuple[dict | None, str | None]:
+        """Return (audio_output dict, audio key) or (None, None)."""
+        mm = getattr(res, "multimodal_output", None)
+        if not mm:
+            ro = getattr(res, "request_output", None)
+            mm = getattr(ro, "multimodal_output", None) if ro else None
+        if not mm:
+            return None, None
+        key = "audio" if "audio" in mm else ("model_outputs" if "model_outputs" in mm else None)
+        return mm, key
+
     def _build_tts_params(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
         """Build TTS parameters from request.
 
@@ -294,7 +305,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         Streaming is supported via stream=True with response_format='pcm'.
         Each Code2Wav chunk is yielded as raw PCM bytes as soon as it is decoded.
         """
-
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -307,28 +317,19 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         try:
             if self._is_tts_model():
-                # Validate TTS parameters
                 validation_error = self._validate_tts_request(request)
                 if validation_error:
                     return self.create_error_response(validation_error)
 
-                # Must use prompt_token_ids (not text prompt): the AR Talker
-                # operates on codec tokens; text token IDs exceed codec vocab.
-                # model.preprocess replaces all embeddings, so placeholder value
-                # is irrelevant -- but length must match to avoid excess padding.
                 tts_params = self._build_tts_params(request)
-
                 if request.ref_audio is not None:
                     wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
                     tts_params["ref_audio"] = [[wav_list, sr]]
 
+                # Prompt length must match model-side embeddings; values are placeholders.
                 ph_len = self._estimate_prompt_len(tts_params)
-                prompt = {
-                    "prompt_token_ids": [1] * ph_len,
-                    "additional_information": tts_params,
-                }
+                prompt = {"prompt_token_ids": [1] * ph_len, "additional_information": tts_params}
             else:
-                # Fallback for unsupported models
                 tts_params = {}
                 prompt = {"prompt": request.input}
 
@@ -348,7 +349,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 output_modalities=["audio"],
             )
 
-            # Streaming path: response format is 'pcm'
             if request.stream:
 
                 async def _generate_pcm_chunks():
@@ -356,42 +356,30 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     sample_rate_val = 24000
                     try:
                         async for res in generator:
-                            audio_output = None
-                            if hasattr(res, "multimodal_output") and res.multimodal_output:
-                                audio_output = res.multimodal_output
-                            if not audio_output and hasattr(res, "request_output"):
-                                ro = res.request_output
-                                if ro and hasattr(ro, "multimodal_output"):
-                                    audio_output = ro.multimodal_output
-
-                            if not audio_output:
-                                continue
-
-                            audio_key = (
-                                "audio"
-                                if "audio" in audio_output
-                                else ("model_outputs" if "model_outputs" in audio_output else None)
-                            )
+                            audio_output, audio_key = self._extract_audio_output(res)
                             if audio_key is None:
                                 continue
-
-                            audio_list = audio_output[audio_key]
-                            if not isinstance(audio_list, list):
-                                audio_list = [audio_list] if audio_list is not None else []
 
                             sr_raw = audio_output.get("sr")
                             if sr_raw is not None:
                                 sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
                                 sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
 
-                            new_chunks = audio_list[prev_count:]
-                            prev_count = len(audio_list)
+                            audio_val = audio_output[audio_key]
+                            if isinstance(audio_val, list):
+                                # Cumulative mode: each update grows the list; emit only new tail.
+                                new_chunks = audio_val[prev_count:]
+                                prev_count = len(audio_val)
+                            else:
+                                # Per-step mode: each update is a single tensor; emit directly.
+                                new_chunks = [audio_val] if audio_val is not None else []
 
                             for chunk_tensor in new_chunks:
-                                if hasattr(chunk_tensor, "float"):
-                                    chunk_np = chunk_tensor.float().detach().cpu().numpy()
-                                else:
-                                    chunk_np = chunk_tensor
+                                chunk_np = (
+                                    chunk_tensor.float().detach().cpu().numpy()
+                                    if hasattr(chunk_tensor, "float")
+                                    else chunk_tensor
+                                )
                                 if chunk_np.ndim > 1:
                                     chunk_np = chunk_np.squeeze()
                                 audio_obj = CreateAudio(
@@ -402,8 +390,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                                     stream_format="audio",
                                     base64_encode=False,
                                 )
-                                audio_response: AudioResponse = self.create_audio(audio_obj)
-                                yield audio_response.audio_data
+                                yield self.create_audio(audio_obj).audio_data
                     except asyncio.CancelledError:
                         logger.info("Streaming request %s cancelled by client", request_id)
                     except Exception as e:
@@ -411,7 +398,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
                 return StreamingResponse(_generate_pcm_chunks(), media_type="audio/pcm")
 
-            # Non-streaming path:
+            # Non-streaming: collect final output
             final_output: OmniRequestOutput | None = None
             async for res in generator:
                 final_output = res
@@ -419,25 +406,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if final_output is None:
                 return self.create_error_response("No output generated from the model.")
 
-            # Extract audio from output
-            # Audio can be in final_output.multimodal_output or final_output.request_output.multimodal_output
-            # Support both "audio" and "model_outputs" keys for compatibility with different models
-            audio_output = None
-            if hasattr(final_output, "multimodal_output") and final_output.multimodal_output:
-                audio_output = final_output.multimodal_output
-            if not audio_output and hasattr(final_output, "request_output"):
-                if final_output.request_output and hasattr(final_output.request_output, "multimodal_output"):
-                    audio_output = final_output.request_output.multimodal_output
-
-            # Check for audio data using either "audio" or "model_outputs" key
-            audio_key = None
-            if audio_output:
-                if "audio" in audio_output:
-                    audio_key = "audio"
-                elif "model_outputs" in audio_output:
-                    audio_key = "model_outputs"
-
-            if not audio_output or audio_key is None:
+            audio_output, audio_key = self._extract_audio_output(final_output)
+            if audio_key is None:
                 return self.create_error_response("TTS model did not produce audio output.")
 
             audio_tensor = audio_output[audio_key]
@@ -450,11 +420,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 import torch
 
                 audio_tensor = torch.cat(audio_tensor, dim=-1)
-            # Convert tensor to numpy
             if hasattr(audio_tensor, "float"):
                 audio_tensor = audio_tensor.float().detach().cpu().numpy()
-
-            # Squeeze batch dimension if present, but preserve channel dimension for stereo
             if audio_tensor.ndim > 1:
                 audio_tensor = audio_tensor.squeeze()
 
@@ -466,8 +433,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 stream_format=request.stream_format,
                 base64_encode=False,
             )
-
-            audio_response: AudioResponse = self.create_audio(audio_obj)
+            audio_response = self.create_audio(audio_obj)
             return Response(content=audio_response.audio_data, media_type=audio_response.media_type)
 
         except asyncio.CancelledError:
