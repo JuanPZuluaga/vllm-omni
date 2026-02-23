@@ -215,6 +215,50 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         wav_np, sr = await loop.run_in_executor(None, _fetch_sync)
         return wav_np.tolist(), sr
 
+    async def _generate_pcm_chunks(self, generator, request_id: str):
+        prev_count = 0
+        sample_rate_val = 24000
+        try:
+            async for res in generator:
+                audio_output, audio_key = self._extract_audio_output(res)
+                if audio_key is None:
+                    continue
+
+                sr_raw = audio_output.get("sr")
+                if sr_raw is not None:
+                    sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+                    sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+
+                audio_val = audio_output[audio_key]
+                if isinstance(audio_val, list):
+                    # Cumulative mode: each update grows the list; emit only new tail.
+                    new_chunks = audio_val[prev_count:]
+                    prev_count = len(audio_val)
+                else:
+                    # Per-step mode: each update is a single tensor; emit directly.
+                    new_chunks = [audio_val] if audio_val is not None else []
+
+                for chunk_tensor in new_chunks:
+                    chunk_np = (
+                        chunk_tensor.float().detach().cpu().numpy() if hasattr(chunk_tensor, "float") else chunk_tensor
+                    )
+                    if chunk_np.ndim > 1:
+                        chunk_np = chunk_np.squeeze()
+                    audio_obj = CreateAudio(
+                        audio_tensor=chunk_np,
+                        sample_rate=sample_rate_val,
+                        response_format="pcm",
+                        speed=1.0,
+                        stream_format="audio",
+                        base64_encode=False,
+                    )
+                    yield self.create_audio(audio_obj).audio_data
+        except asyncio.CancelledError:
+            logger.info("Streaming request %s cancelled by client", request_id)
+            raise
+        except Exception as e:
+            logger.exception("Streaming speech generation failed for %s: %s", request_id, e)
+
     @staticmethod
     def _extract_audio_output(res) -> tuple[dict | None, str | None]:
         """Return (audio_output dict, audio key) or (None, None)."""
@@ -350,53 +394,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             )
 
             if request.stream:
-
-                async def _generate_pcm_chunks():
-                    prev_count = 0
-                    sample_rate_val = 24000
-                    try:
-                        async for res in generator:
-                            audio_output, audio_key = self._extract_audio_output(res)
-                            if audio_key is None:
-                                continue
-
-                            sr_raw = audio_output.get("sr")
-                            if sr_raw is not None:
-                                sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
-                                sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
-
-                            audio_val = audio_output[audio_key]
-                            if isinstance(audio_val, list):
-                                # Cumulative mode: each update grows the list; emit only new tail.
-                                new_chunks = audio_val[prev_count:]
-                                prev_count = len(audio_val)
-                            else:
-                                # Per-step mode: each update is a single tensor; emit directly.
-                                new_chunks = [audio_val] if audio_val is not None else []
-
-                            for chunk_tensor in new_chunks:
-                                chunk_np = (
-                                    chunk_tensor.float().detach().cpu().numpy()
-                                    if hasattr(chunk_tensor, "float")
-                                    else chunk_tensor
-                                )
-                                if chunk_np.ndim > 1:
-                                    chunk_np = chunk_np.squeeze()
-                                audio_obj = CreateAudio(
-                                    audio_tensor=chunk_np,
-                                    sample_rate=sample_rate_val,
-                                    response_format="pcm",
-                                    speed=1.0,
-                                    stream_format="audio",
-                                    base64_encode=False,
-                                )
-                                yield self.create_audio(audio_obj).audio_data
-                    except asyncio.CancelledError:
-                        logger.info("Streaming request %s cancelled by client", request_id)
-                    except Exception as e:
-                        logger.exception("Streaming speech generation failed for %s: %s", request_id, e)
-
-                return StreamingResponse(_generate_pcm_chunks(), media_type="audio/pcm")
+                return StreamingResponse(
+                    self._generate_pcm_chunks(generator, request_id),
+                    media_type="audio/pcm",
+                )
 
             # Non-streaming: collect final output
             final_output: OmniRequestOutput | None = None

@@ -517,6 +517,7 @@ class AsyncOmni(OmniBase):
                     final_output_type=stage.final_output_type,
                     request_output=engine_outputs,
                     images=images,
+                    finished=finished,
                 )
             else:
                 output_to_yield = OmniRequestOutput(
