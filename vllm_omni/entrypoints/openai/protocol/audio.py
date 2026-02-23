@@ -71,7 +71,9 @@ class OpenAICreateSpeechRequest(BaseModel):
                     "Streaming (stream=true) requires response_format='pcm'. "
                     f"Got response_format='{self.response_format}'."
                 )
-            if self.speed is not None and self.speed != 1.0:
+            if self.speed is None:
+                self.speed = 1.0
+            elif self.speed != 1.0:
                 raise ValueError(
                     "Speed adjustment is not supported when streaming (stream=true). Set speed=1.0 or omit it."
                 )
