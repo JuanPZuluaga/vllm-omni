@@ -117,16 +117,19 @@ class Qwen3TTSCode2Wav(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor | OmniOutput, sampling_metadata: Any = None) -> None:
         return None
 
-    def _split_request_ids(self, ids: torch.Tensor) -> list[torch.Tensor]:
-        """
-        Split concatenated input_ids into per-request segments using forward context.
+    def _split_request_ids(self, ids: torch.Tensor, seq_token_counts: list[int] | None = None) -> list[torch.Tensor]:
+        """Split concatenated input_ids into per-request segments.
 
-        Uses ubatch_slices from forward context which contains either:
-        - int: number of tokens in the request
-        - slice object with token_slice attribute
-
-        Returns list of per-request id tensors, or [ids] if not in batched context.
+        Uses seq_token_counts (injected by the runner via model_kwargs) when
+        available, falling back to forward-context ubatch_slices when
+        micro-batching is active. Returns [ids] for single-request batches.
         """
+        if seq_token_counts is not None and len(seq_token_counts) > 1:
+            boundaries = [0]
+            for count in seq_token_counts:
+                boundaries.append(boundaries[-1] + count)
+            n = ids.numel()
+            return [ids[boundaries[i] : min(boundaries[i + 1], n)] for i in range(len(seq_token_counts))]
         if is_forward_context_available():
             slices = get_forward_context().ubatch_slices
             if slices is not None and len(slices) > 1 and not any(hasattr(s, "token_slice") for s in slices):
@@ -172,7 +175,7 @@ class Qwen3TTSCode2Wav(nn.Module):
             )
 
         ids = input_ids.reshape(-1).to(dtype=torch.long)
-        request_ids_list = self._split_request_ids(ids)
+        request_ids_list = self._split_request_ids(ids, kwargs.get("seq_token_counts"))
 
         # Parse each request: extract ctx_frames, validate, reshape codes.
         # input_ids layout per request: [codec_context_frames, *flat_codes]
