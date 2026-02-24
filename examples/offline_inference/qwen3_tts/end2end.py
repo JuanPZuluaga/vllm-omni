@@ -7,6 +7,7 @@ tasks, then runs Omni generation and saves output wav files.
 import asyncio
 import logging
 import os
+import sys
 from typing import Any, NamedTuple
 
 import soundfile as sf
@@ -66,6 +67,14 @@ def _estimate_prompt_len(
         return 2048
 
 
+def _make_input(additional_information: dict, model_name: str) -> dict:
+    """Wrap additional_information with estimated prompt_token_ids placeholder."""
+    return {
+        "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
+        "additional_information": additional_information,
+    }
+
+
 def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
     """Build CustomVoice sample inputs.
 
@@ -84,7 +93,7 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
         speakers = ["Vivian", "Ryan"]
         inputs = []
         for text, instruct, language, speaker in zip(texts, instructs, languages, speakers):
-            additional_information = {
+            info = {
                 "task_type": [task_type],
                 "text": [text],
                 "instruct": [instruct],
@@ -92,33 +101,18 @@ def get_custom_voice_query(use_batch_sample: bool = False) -> QueryResult:
                 "speaker": [speaker],
                 "max_new_tokens": [2048],
             }
-            inputs.append(
-                {
-                    "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-                    "additional_information": additional_information,
-                }
-            )
+            inputs.append(_make_input(info, model_name))
     else:
-        text = "其实我真的有发现，我是一个特别善于观察别人情绪的人。"
-        language = "Chinese"
-        speaker = "Vivian"
-        instruct = "用特别愤怒的语气说"
-        additional_information = {
+        info = {
             "task_type": [task_type],
-            "text": [text],
-            "language": [language],
-            "speaker": [speaker],
-            "instruct": [instruct],
+            "text": ["其实我真的有发现，我是一个特别善于观察别人情绪的人。"],
+            "language": ["Chinese"],
+            "speaker": ["Vivian"],
+            "instruct": ["用特别愤怒的语气说"],
             "max_new_tokens": [2048],
         }
-        inputs = {
-            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-            "additional_information": additional_information,
-        }
-    return QueryResult(
-        inputs=inputs,
-        model_name=model_name,
-    )
+        inputs = _make_input(info, model_name)
+    return QueryResult(inputs=inputs, model_name=model_name)
 
 
 def get_voice_design_query(use_batch_sample: bool = False) -> QueryResult:
@@ -144,7 +138,7 @@ def get_voice_design_query(use_batch_sample: bool = False) -> QueryResult:
         languages = ["Chinese", "English"]
         inputs = []
         for text, instruct, language in zip(texts, instructs, languages):
-            additional_information = {
+            info = {
                 "task_type": [task_type],
                 "text": [text],
                 "language": [language],
@@ -152,32 +146,18 @@ def get_voice_design_query(use_batch_sample: bool = False) -> QueryResult:
                 "max_new_tokens": [2048],
                 "non_streaming_mode": [True],
             }
-            inputs.append(
-                {
-                    "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-                    "additional_information": additional_information,
-                }
-            )
+            inputs.append(_make_input(info, model_name))
     else:
-        text = "哥哥，你回来啦，人家等了你好久好久了，要抱抱！"
-        instruct = "体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。"
-        language = "Chinese"
-        additional_information = {
+        info = {
             "task_type": [task_type],
-            "text": [text],
-            "language": [language],
-            "instruct": [instruct],
+            "text": ["哥哥，你回来啦，人家等了你好久好久了，要抱抱！"],
+            "language": ["Chinese"],
             "max_new_tokens": [2048],
             "non_streaming_mode": [True],
+            "instruct": ["体现撒娇稚嫩的萝莉女声，音调偏高且起伏明显，营造出黏人、做作又刻意卖萌的听觉效果。"],
         }
-        inputs = {
-            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-            "additional_information": additional_information,
-        }
-    return QueryResult(
-        inputs=inputs,
-        model_name=model_name,
-    )
+        inputs = _make_input(info, model_name)
+    return QueryResult(inputs=inputs, model_name=model_name)
 
 
 def get_base_query(use_batch_sample: bool = False, mode_tag: str = "icl") -> QueryResult:
@@ -192,55 +172,30 @@ def get_base_query(use_batch_sample: bool = False, mode_tag: str = "icl") -> Que
     """
     task_type = "Base"
     model_name = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-    ref_audio_path_1 = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"
-    ref_audio_single = ref_audio_path_1
-    ref_text_single = (
-        "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you."
-    )
-    syn_text_single = "Good one. Okay, fine, I'm just gonna leave this sock monkey here. Goodbye."
-    syn_lang_single = "Auto"
-    x_vector_only_mode = mode_tag == "xvec_only"
+    ref_audio = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-TTS-Repo/clone_2.wav"
+    ref_text = "Okay. Yeah. I resent you. I love you. I respect you. But you know what? You blew it! And thanks to you."  # noqa: E501
+    xvec_only = mode_tag == "xvec_only"
+    common = {
+        "task_type": [task_type],
+        "ref_audio": [ref_audio],
+        "ref_text": [ref_text],
+        "x_vector_only_mode": [xvec_only],
+        "max_new_tokens": [2048],
+    }
     if use_batch_sample:
-        syn_text_batch = [
+        texts = [
             "Good one. Okay, fine, I'm just gonna leave this sock monkey here. Goodbye.",
             "其实我真的有发现，我是一个特别善于观察别人情绪的人。",
         ]
-        syn_lang_batch = ["Chinese", "English"]
-        inputs = []
-        for text, language in zip(syn_text_batch, syn_lang_batch):
-            additional_information = {
-                "task_type": [task_type],
-                "ref_audio": [ref_audio_single],
-                "ref_text": [ref_text_single],
-                "text": [text],
-                "language": [language],
-                "x_vector_only_mode": [x_vector_only_mode],
-                "max_new_tokens": [2048],
-            }
-            inputs.append(
-                {
-                    "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-                    "additional_information": additional_information,
-                }
-            )
+        languages = ["Chinese", "English"]
+        inputs = [
+            _make_input({**common, "text": [t], "language": [lang]}, model_name) for t, lang in zip(texts, languages)
+        ]
     else:
-        additional_information = {
-            "task_type": [task_type],
-            "ref_audio": [ref_audio_single],
-            "ref_text": [ref_text_single],
-            "text": [syn_text_single],
-            "language": [syn_lang_single],
-            "x_vector_only_mode": [x_vector_only_mode],
-            "max_new_tokens": [2048],
-        }
-        inputs = {
-            "prompt_token_ids": [0] * _estimate_prompt_len(additional_information, model_name),
-            "additional_information": additional_information,
-        }
-    return QueryResult(
-        inputs=inputs,
-        model_name=model_name,
-    )
+        text = "Good one. Okay, fine, I'm just gonna leave this sock monkey here. Goodbye."
+        info = {**common, "text": [text], "language": ["Auto"]}
+        inputs = _make_input(info, model_name)
+    return QueryResult(inputs=inputs, model_name=model_name)
 
 
 query_map = {
@@ -269,15 +224,17 @@ def _build_inputs(args) -> tuple[str, list]:
             raise ValueError(f"No valid prompts found in {args.txt_prompts}")
         template = query_result.inputs if not isinstance(query_result.inputs, list) else query_result.inputs[0]
         template_info = template["additional_information"]
-        inputs = [
-            {
-                "prompt_token_ids": [0] * _estimate_prompt_len({**template_info, "text": [t]}, model_name),
-                "additional_information": {**template_info, "text": [t]},
-            }
-            for t in lines
-        ]
+        inputs = [_make_input({**template_info, "text": [t]}, model_name) for t in lines]
     else:
         inputs = query_result.inputs if isinstance(query_result.inputs, list) else [query_result.inputs]
+
+    if args.num_prompts is not None:
+        n = args.num_prompts
+        if n > len(inputs):
+            full, rem = divmod(n, len(inputs))
+            inputs = inputs * full + inputs[:rem]
+        else:
+            inputs = inputs[:n]
 
     return model_name, inputs
 
@@ -294,18 +251,21 @@ def _save_wav(output_dir: str, request_id: str, mm: dict) -> None:
     logger.info(f"Request ID: {request_id}, Saved audio to {out_wav}")
 
 
+def _validate_batch_size(batch_size: int) -> None:
+    if batch_size < 1 or (batch_size & (batch_size - 1)) != 0:
+        raise ValueError(
+            f"--batch-size must be a power of two (got {batch_size}); "
+            "non-power-of-two values do not align with CUDA graph capture sizes "
+            "of Code2Wav."
+        )
+
+
 def main(args):
     """Run offline inference with Omni."""
     model_name, inputs = _build_inputs(args)
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
-
-    if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0:
-        raise ValueError(
-            f"--batch-size must be a power of two (got {args.batch_size}); "
-            "non-power-of-two values do not align with CUDA graph capture sizes "
-            "of Code2Wav."
-        )
+    _validate_batch_size(args.batch_size)
 
     omni = Omni(
         model=model_name,
@@ -328,6 +288,8 @@ async def main_streaming(args):
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
+    _validate_batch_size(args.batch_size)
+
     omni = AsyncOmni(
         model=model_name,
         stage_configs_path=args.stage_configs_path,
@@ -335,8 +297,7 @@ async def main_streaming(args):
         stage_init_timeout=args.stage_init_timeout,
     )
 
-    for i, prompt in enumerate(inputs):
-        request_id = str(i)
+    async def _stream_one(prompt, request_id):
         async for stage_output in omni.generate(prompt, request_id=request_id):
             mm = stage_output.request_output.outputs[0].multimodal_output
             if not stage_output.finished:
@@ -345,6 +306,11 @@ async def main_streaming(args):
                 logger.info(f"Request {request_id}: received chunk {n}")
             else:
                 _save_wav(output_dir, request_id, mm)
+
+    batch_size = args.batch_size
+    for batch_start in range(0, len(inputs), batch_size):
+        batch = inputs[batch_start : batch_start + batch_size]
+        await asyncio.gather(*[_stream_one(prompt, str(batch_start + j)) for j, prompt in enumerate(batch)])
 
 
 def parse_args():
@@ -369,24 +335,9 @@ def parse_args():
         default=300,
         help="Timeout for initializing a single stage in seconds (default: 300)",
     )
-    parser.add_argument(
-        "--batch-timeout",
-        type=int,
-        default=5,
-        help="Timeout for batching in seconds (default: 5)",
-    )
-    parser.add_argument(
-        "--init-timeout",
-        type=int,
-        default=300,
-        help="Timeout for initializing stages in seconds (default: 300)",
-    )
-    parser.add_argument(
-        "--shm-threshold-bytes",
-        type=int,
-        default=65536,
-        help="Threshold for using shared memory in bytes (default: 65536)",
-    )
+    parser.add_argument("--batch-timeout", type=int, default=5, help="[Deprecated] No effect.")
+    parser.add_argument("--init-timeout", type=int, default=300, help="[Deprecated] No effect.")
+    parser.add_argument("--shm-threshold-bytes", type=int, default=65536, help="[Deprecated] No effect.")
     parser.add_argument(
         "--output-dir",
         default="output_audio",
@@ -395,8 +346,8 @@ def parse_args():
     parser.add_argument(
         "--num-prompts",
         type=int,
-        default=1,
-        help="Number of prompts to generate.",
+        default=None,
+        help="Total prompts to run; cycles through available prompts if needed (default: all).",
     )
     parser.add_argument(
         "--txt-prompts",
@@ -410,31 +361,11 @@ def parse_args():
         default=None,
         help="Path to a stage configs file.",
     )
-    parser.add_argument(
-        "--audio-path",
-        "-a",
-        type=str,
-        default=None,
-        help="Path to local audio file. If not provided, uses default audio asset.",
-    )
-    parser.add_argument(
-        "--sampling-rate",
-        type=int,
-        default=16000,
-        help="Sampling rate for audio loading (default: 16000).",
-    )
-    parser.add_argument(
-        "--log-dir",
-        type=str,
-        default="logs",
-        help="Log directory (default: logs).",
-    )
-    parser.add_argument(
-        "--py-generator",
-        action="store_true",
-        default=False,
-        help="Use py_generator mode. The returned type of Omni.generate() is a Python Generator object.",
-    )
+    # Deprecated args — kept for backwards compatibility, will be removed.
+    parser.add_argument("--audio-path", "-a", type=str, default=None, help="[Deprecated] No effect.")
+    parser.add_argument("--sampling-rate", type=int, default=16000, help="[Deprecated] No effect.")
+    parser.add_argument("--log-dir", type=str, default="logs", help="[Deprecated] No effect.")
+    parser.add_argument("--py-generator", action="store_true", default=False, help="[Deprecated] No effect.")
     parser.add_argument(
         "--use-batch-sample",
         action="store_true",
@@ -461,7 +392,24 @@ def parse_args():
         help="Stream audio chunks as they arrive via AsyncOmni (async_chunk mode only).",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    _DEPRECATED_FLAGS = [
+        "--audio-path",
+        "-a",
+        "--sampling-rate",
+        "--log-dir",
+        "--py-generator",
+        "--batch-timeout",
+        "--init-timeout",
+        "--shm-threshold-bytes",
+    ]
+    for flag in sys.argv[1:]:
+        name = flag.split("=")[0]
+        if name in _DEPRECATED_FLAGS:
+            logger.warning("%s is deprecated, has no effect, and will be removed in a future release.", name)
+
+    return args
 
 
 if __name__ == "__main__":
