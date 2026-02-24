@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 from vllm import SamplingParams
+
 from vllm_omni.entrypoints.openai.image_api_utils import (
     encode_image_base64,
     parse_size,
