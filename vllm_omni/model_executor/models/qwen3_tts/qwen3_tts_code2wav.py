@@ -234,7 +234,8 @@ class Qwen3TTSCode2Wav(nn.Module):
 
         # Batched decode: single forward pass through SpeechTokenizer.
         wavs, _ = tok.decode(valid_codes)
-        assert len(wavs) == len(valid_codes), f"Code2Wav returned {len(wavs)} waveforms for {len(valid_codes)} requests"
+        if len(wavs) != len(valid_codes):
+            raise RuntimeError(f"Code2Wav returned {len(wavs)} waveforms for {len(valid_codes)} requests")
 
         # Build per-request outputs, trimming padding and left-context.
         audios = [empty] * num_req

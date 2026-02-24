@@ -274,6 +274,8 @@ def main(args):
     if args.txt_prompts:
         with open(args.txt_prompts) as f:
             lines = [line.strip() for line in f if line.strip()]
+        if not lines:
+            raise ValueError(f"No valid prompts found in {args.txt_prompts}")
         template = query_result.inputs
         if isinstance(template, list):
             template = template[0]
