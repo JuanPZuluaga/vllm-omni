@@ -251,7 +251,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     prev_count = len(audio_val)
                 else:
                     # Per-step mode: each update is a single tensor; emit directly.
-                    new_chunks = [audio_val] if audio_val is not None else []
+                    if audio_val is not None:
+                        new_chunks = [audio_val]
+                        prev_count += 1
+                    else:
+                        new_chunks = []
 
                 for chunk_tensor in new_chunks:
                     chunk_np = (
