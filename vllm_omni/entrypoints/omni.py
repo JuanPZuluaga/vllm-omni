@@ -13,9 +13,9 @@ from typing import Any, Literal, overload
 import huggingface_hub
 from omegaconf import OmegaConf
 from tqdm.auto import tqdm
+from vllm import SamplingParams
 from vllm.logger import init_logger
 
-from vllm import SamplingParams
 from vllm_omni.distributed.omni_connectors import (
     get_stage_connector_config,
     initialize_orchestrator_connectors,
