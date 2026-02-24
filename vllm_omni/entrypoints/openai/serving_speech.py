@@ -216,6 +216,21 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         return wav_np.tolist(), sr
 
     async def _generate_pcm_chunks(self, generator, request_id: str):
+        """Generate PCM audio chunks for streaming response.
+
+        Handles two audio output modes from the engine:
+        - Cumulative mode (list): Engine returns growing list of chunks;
+        we emit only the new tail on each iteration.
+        - Per-step mode (tensor): Engine returns single tensor per iteration;
+        we emit it directly.
+
+        Args:
+            generator: Async generator from the engine
+            request_id: Request identifier for logging
+
+        Yields:
+            Raw PCM bytes for each audio chunk
+        """
         prev_count = 0
         sample_rate_val = 24000
         try:
