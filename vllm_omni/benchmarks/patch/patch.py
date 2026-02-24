@@ -206,6 +206,7 @@ if "openai-chat-omni" not in OPENAI_COMPATIBLE_BACKENDS:
 # Prevent import order from causing patch failures
 from vllm.benchmarks import serve
 from vllm.benchmarks.serve import TaskType, calculate_metrics_for_embeddings, get_request, wait_for_endpoint
+
 from vllm_omni.benchmarks.metrics.metrics import MultiModalsBenchmarkMetrics, calculate_metrics
 
 # ruff: noqa: E402
