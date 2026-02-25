@@ -252,6 +252,13 @@ query_map = {
 
 def _build_inputs(args) -> tuple[str, list]:
     """Resolve model name and inputs list from CLI args."""
+    if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0:
+        raise ValueError(
+            f"--batch-size must be a power of two (got {args.batch_size}); "
+            "non-power-of-two values do not align with CUDA graph capture sizes "
+            "of Code2Wav."
+        )
+
     query_func = query_map[args.query_type]
     if args.query_type in {"CustomVoice", "VoiceDesign"}:
         query_result = query_func(use_batch_sample=args.use_batch_sample)
@@ -265,6 +272,8 @@ def _build_inputs(args) -> tuple[str, list]:
     if args.txt_prompts:
         with open(args.txt_prompts) as f:
             lines = [line.strip() for line in f if line.strip()]
+        if not lines:
+            raise ValueError(f"No valid prompts found in {args.txt_prompts}")
         template = query_result.inputs if not isinstance(query_result.inputs, list) else query_result.inputs[0]
         template_info = template["additional_information"]
         inputs = [
@@ -295,9 +304,7 @@ def _save_wav(output_dir: str, request_id: str, mm: dict) -> None:
 def main(args):
     """Run offline inference with Omni."""
     model_name, inputs = _build_inputs(args)
-    if args.output_dir is None:
-        logger.warning("--output-wav is deprecated; use --output-dir instead.")
-    output_dir = args.output_dir or args.output_wav
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     omni = Omni(
@@ -307,17 +314,18 @@ def main(args):
         stage_init_timeout=args.stage_init_timeout,
     )
 
-    for stage_outputs in omni.generate(inputs):
-        for output in stage_outputs.request_output:
-            _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
+    batch_size = args.batch_size
+    for batch_start in range(0, len(inputs), batch_size):
+        batch = inputs[batch_start : batch_start + batch_size]
+        for stage_outputs in omni.generate(batch):
+            for output in stage_outputs.request_output:
+                _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
 
 
 async def main_streaming(args):
     """Run offline inference with AsyncOmni, logging each audio chunk as it arrives."""
     model_name, inputs = _build_inputs(args)
-    if args.output_dir is None:
-        logger.warning("--output-wav is deprecated; use --output-dir instead.")
-    output_dir = args.output_dir or args.output_wav
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     omni = AsyncOmni(
@@ -380,14 +388,9 @@ def parse_args():
         help="Threshold for using shared memory in bytes (default: 65536)",
     )
     parser.add_argument(
-        "--output-wav",
-        default="output_audio",
-        help="[Deprecated] Output wav directory (use --output-dir).",
-    )
-    parser.add_argument(
         "--output-dir",
-        default=None,
-        help="Directory to save output wav files (default: output_audio).",
+        default="output_audio",
+        help="Output directory for generated wav files (default: output_audio).",
     )
     parser.add_argument(
         "--num-prompts",
@@ -450,6 +453,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Stream audio chunks as they arrive via AsyncOmni (async_chunk mode only).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Number of prompts per batch (default: 1, sequential).",
     )
 
     return parser.parse_args()
