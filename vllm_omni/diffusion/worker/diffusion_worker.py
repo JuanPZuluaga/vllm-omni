@@ -143,7 +143,10 @@ class DiffusionWorker:
                 self.rank,
                 process_memory / GiB_bytes,
             )
-        assert self.model_runner.pipeline is not None
+
+        # When load_format is "dummy", pipeline will init with custom pipeline later
+        if load_format != "dummy":
+            assert self.model_runner.pipeline is not None
 
     def init_lora_manager(self) -> None:
         """Initialize the LoRA manager for this worker."""
@@ -192,8 +195,10 @@ class DiffusionWorker:
     def remove_lora(self, adapter_id: int) -> bool:
         return self.lora_manager.remove_adapter(adapter_id)
 
-    def add_lora(self, lora_request: LoRARequest, lora_scale: float = 1.0) -> bool:
-        return self.lora_manager.add_adapter(lora_request, lora_scale)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        # NOTE (Alex): We have not implemented the API routing
+        # for the frontend server yet.
+        return self.lora_manager.add_adapter(lora_request)
 
     def list_loras(self) -> list[int]:
         return self.lora_manager.list_adapters()

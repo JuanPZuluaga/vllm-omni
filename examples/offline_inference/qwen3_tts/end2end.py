@@ -401,12 +401,6 @@ def parse_args():
         help="Mode tag for Base query x_vector_only_mode (default: icl).",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="Number of prompts per batch (default: 1, sequential).",
-    )
-    parser.add_argument(
         "--streaming",
         action="store_true",
         default=False,
