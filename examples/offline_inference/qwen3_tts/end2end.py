@@ -7,7 +7,6 @@ tasks, then runs Omni generation and saves output wav files.
 import asyncio
 import logging
 import os
-import sys
 from typing import Any, NamedTuple
 
 import soundfile as sf
@@ -207,6 +206,13 @@ query_map = {
 
 def _build_inputs(args) -> tuple[str, list]:
     """Resolve model name and inputs list from CLI args."""
+    if args.batch_size < 1 or (args.batch_size & (args.batch_size - 1)) != 0:
+        raise ValueError(
+            f"--batch-size must be a power of two (got {args.batch_size}); "
+            "non-power-of-two values do not align with CUDA graph capture sizes "
+            "of Code2Wav."
+        )
+
     query_func = query_map[args.query_type]
     if args.query_type in {"CustomVoice", "VoiceDesign"}:
         query_result = query_func(use_batch_sample=args.use_batch_sample)
@@ -277,7 +283,7 @@ def main(args):
     batch_size = args.batch_size
     for batch_start in range(0, len(inputs), batch_size):
         batch = inputs[batch_start : batch_start + batch_size]
-        for stage_outputs in omni.generate(batch, sampling_params_list=None):
+        for stage_outputs in omni.generate(batch):
             for output in stage_outputs.request_output:
                 _save_wav(output_dir, output.request_id, output.outputs[0].multimodal_output)
 
@@ -335,9 +341,24 @@ def parse_args():
         default=300,
         help="Timeout for initializing a single stage in seconds (default: 300)",
     )
-    parser.add_argument("--batch-timeout", type=int, default=5, help="[Deprecated] No effect.")
-    parser.add_argument("--init-timeout", type=int, default=300, help="[Deprecated] No effect.")
-    parser.add_argument("--shm-threshold-bytes", type=int, default=65536, help="[Deprecated] No effect.")
+    parser.add_argument(
+        "--batch-timeout",
+        type=int,
+        default=5,
+        help="Timeout for batching in seconds (default: 5)",
+    )
+    parser.add_argument(
+        "--init-timeout",
+        type=int,
+        default=300,
+        help="Timeout for initializing stages in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--shm-threshold-bytes",
+        type=int,
+        default=65536,
+        help="Threshold for using shared memory in bytes (default: 65536)",
+    )
     parser.add_argument(
         "--output-dir",
         default="output_audio",
@@ -391,25 +412,14 @@ def parse_args():
         default=False,
         help="Stream audio chunks as they arrive via AsyncOmni (async_chunk mode only).",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Number of prompts per batch (default: 1, sequential).",
+    )
 
-    args = parser.parse_args()
-
-    _DEPRECATED_FLAGS = [
-        "--audio-path",
-        "-a",
-        "--sampling-rate",
-        "--log-dir",
-        "--py-generator",
-        "--batch-timeout",
-        "--init-timeout",
-        "--shm-threshold-bytes",
-    ]
-    for flag in sys.argv[1:]:
-        name = flag.split("=")[0]
-        if name in _DEPRECATED_FLAGS:
-            logger.warning("%s is deprecated, has no effect, and will be removed in a future release.", name)
-
-    return args
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
