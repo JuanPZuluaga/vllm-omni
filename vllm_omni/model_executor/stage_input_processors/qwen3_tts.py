@@ -3,6 +3,9 @@
 from typing import Any
 
 import torch
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def _extract_last_frame(pooling_output: dict[str, Any]) -> torch.Tensor | None:
@@ -42,11 +45,20 @@ def talker2code2wav_async_chunk(
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size = int(cfg.get("codec_left_context_frames", 25))
+    initial_chunk_size = int(cfg.get("initial_codec_chunk_frames", 0))
     if chunk_size <= 0 or left_context_size < 0:
         raise ValueError(
             f"Invalid codec chunk config: codec_chunk_frames={chunk_size}, "
             f"codec_left_context_frames={left_context_size}"
         )
+    if initial_chunk_size >= chunk_size:
+        if initial_chunk_size > 0:
+            logger.warning(
+                "initial_codec_chunk_frames=%d >= codec_chunk_frames=%d, clamping to codec_chunk_frames.",
+                initial_chunk_size,
+                chunk_size,
+            )
+        initial_chunk_size = chunk_size
     length = len(transfer_manager.code_prompt_token_ids[request_id])
 
     # Avoid emitting empty chunks during normal streaming. If the request is
@@ -59,15 +71,34 @@ def talker2code2wav_async_chunk(
             }
         return None
 
-    chunk_length = length % chunk_size
+    in_warmup = initial_chunk_size > 0 and length <= chunk_size
 
-    if chunk_length != 0 and not finished:
-        return None
-
-    context_length = chunk_length if chunk_length != 0 else chunk_size
-    end_index = min(length, left_context_size + context_length)
-    ctx_frames = max(0, int(end_index - context_length))
-    window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
+    if in_warmup:
+        # Warmup phase: emit every initial_chunk_size frames with full context.
+        # Track frames already delivered using put_req_chunk counter.
+        already_sent = transfer_manager.put_req_chunk[request_id] * initial_chunk_size
+        pending = length - already_sent
+        at_initial_boundary = pending >= initial_chunk_size
+        at_chunk_boundary = length >= chunk_size
+        if not at_initial_boundary and not at_chunk_boundary and not finished:
+            return None
+        # At chunk_size boundary, flush remaining even if < initial_chunk_size.
+        context_length = min(pending, initial_chunk_size)
+        if at_chunk_boundary and not at_initial_boundary:
+            context_length = pending
+        end_index = length
+        ctx_frames = max(0, length - context_length)
+        window_frames = transfer_manager.code_prompt_token_ids[request_id][:length]
+    else:
+        # Normal phase: standard chunk_size cadence with left_context sliding window.
+        adjusted = (length - chunk_size) if initial_chunk_size > 0 else length
+        chunk_length = adjusted % chunk_size
+        if chunk_length != 0 and not finished:
+            return None
+        context_length = chunk_length if chunk_length != 0 else chunk_size
+        end_index = min(length, left_context_size + context_length)
+        ctx_frames = max(0, int(end_index - context_length))
+        window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
 
     # Pack context + chunk into codebook-major flat codes for adapter.
     code_predictor_codes = torch.tensor(window_frames).transpose(0, 1).reshape(-1).tolist()
