@@ -4,27 +4,53 @@
 from collections import defaultdict
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_omni.model_executor.stage_input_processors.qwen3_tts import talker2code2wav_async_chunk
 
+_FRAME = [1, 2, 3, 4]  # 4-codebook frame
+_Q = len(_FRAME)  # num quantizers
 
-def _req(external_req_id: str, *, finished: bool):
+
+def _req(rid: str, *, finished: bool):
+    return SimpleNamespace(external_req_id=rid, is_finished=lambda: finished)
+
+
+def _tm(*, chunk_frames=25, left_context=25, initial_chunk=0):
     return SimpleNamespace(
-        external_req_id=external_req_id,
-        is_finished=lambda: finished,
-    )
-
-
-def test_talker2code2wav_async_chunk_does_not_emit_empty_chunk_when_not_finished():
-    transfer_manager = SimpleNamespace(
         code_prompt_token_ids=defaultdict(list),
-        connector=SimpleNamespace(config={"extra": {"codec_chunk_frames": 25, "codec_left_context_frames": 25}}),
+        put_req_chunk=defaultdict(int),
+        connector=SimpleNamespace(
+            config={
+                "extra": {
+                    "codec_chunk_frames": chunk_frames,
+                    "codec_left_context_frames": left_context,
+                    "initial_codec_chunk_frames": initial_chunk,
+                }
+            }
+        ),
     )
+
+
+def _call(tm, rid, *, n_frames, put_req=0, finished=False):
+    """Feed n_frames into transfer_manager and call the gate function."""
+    tm.code_prompt_token_ids[rid] = [_FRAME[:] for _ in range(n_frames)]
+    tm.put_req_chunk[rid] = put_req
+    return talker2code2wav_async_chunk(
+        transfer_manager=tm,
+        pooling_output={"audio_codes": torch.zeros((0,))},
+        request=_req(rid, finished=finished),
+        is_finished=finished,
+    )
+
+
+def test_does_not_emit_empty_chunk_when_not_finished():
+    tm = _tm()
     request = _req("rid-empty", finished=False)
 
     payload = talker2code2wav_async_chunk(
-        transfer_manager=transfer_manager,
+        transfer_manager=tm,
         pooling_output={"audio_codes": torch.zeros((0,))},
         request=request,
     )
@@ -32,36 +58,29 @@ def test_talker2code2wav_async_chunk_does_not_emit_empty_chunk_when_not_finished
     assert payload is None
 
 
-def test_talker2code2wav_async_chunk_flushes_tail_when_finished_without_pooler_output():
-    transfer_manager = SimpleNamespace(
-        code_prompt_token_ids=defaultdict(list),
-        connector=SimpleNamespace(config={"extra": {"codec_chunk_frames": 25, "codec_left_context_frames": 25}}),
-    )
-    request_id = "rid-tail"
-    transfer_manager.code_prompt_token_ids[request_id] = [[1, 2, 3, 4] for _ in range(24)]
-    request = _req(request_id, finished=True)
+def test_flushes_tail_when_finished_without_pooler_output():
+    tm = _tm()
+    rid = "rid-tail"
+    tm.code_prompt_token_ids[rid] = [_FRAME[:] for _ in range(24)]
+    request = _req(rid, finished=True)
 
     payload = talker2code2wav_async_chunk(
-        transfer_manager=transfer_manager,
-        pooling_output=None,  # e.g. EOS step with no audio_codes
+        transfer_manager=tm,
+        pooling_output=None,
         request=request,
     )
 
     assert payload is not None
     assert payload["finished"].item() is True
-    # ctx_frames header + flat codes
-    assert len(payload["code_predictor_codes"]) == 1 + 4 * 24
+    assert len(payload["code_predictor_codes"]) == 1 + _Q * 24
 
 
-def test_talker2code2wav_async_chunk_emits_eof_marker_when_finished_with_no_frames():
-    transfer_manager = SimpleNamespace(
-        code_prompt_token_ids=defaultdict(list),
-        connector=SimpleNamespace(config={"extra": {"codec_chunk_frames": 25, "codec_left_context_frames": 25}}),
-    )
+def test_emits_eof_marker_when_finished_with_no_frames():
+    tm = _tm()
     request = _req("rid-eof", finished=True)
 
     payload = talker2code2wav_async_chunk(
-        transfer_manager=transfer_manager,
+        transfer_manager=tm,
         pooling_output=None,
         request=request,
     )
@@ -70,3 +89,36 @@ def test_talker2code2wav_async_chunk_emits_eof_marker_when_finished_with_no_fram
         "code_predictor_codes": [],
         "finished": torch.tensor(True, dtype=torch.bool),
     }
+
+
+_CASES = [
+    # Normal path (initial=0): emit at chunk_size boundaries
+    ((25, 25, 0), (24, 0, False), None),
+    ((25, 25, 0), (25, 0, False), (0, 25)),
+    # Warmup: first emit, hold, second emit, non-divisible boundary
+    ((25, 25, 10), (9, 0, False), None),
+    ((25, 25, 10), (10, 0, False), (0, 10)),
+    ((25, 25, 10), (20, 1, False), (10, 20)),
+    ((25, 25, 10), (25, 2, False), (20, 25)),
+    # Normal phase after warmup
+    ((25, 25, 10), (50, 3, False), (25, 50)),
+    # initial >= chunk clamps to chunk_size (behaves as normal)
+    ((25, 25, 30), (25, 0, False), (0, 25)),
+]
+
+
+@pytest.mark.parametrize("config, state, expected", _CASES)
+def test_streaming_decoding_with_variable_initial(config, state, expected):
+    chunk_frames, left_context, initial_chunk = config
+    n_frames, put_req, finished = state
+
+    tm = _tm(chunk_frames=chunk_frames, left_context=left_context, initial_chunk=initial_chunk)
+    payload = _call(tm, "r", n_frames=n_frames, put_req=put_req, finished=finished)
+
+    if expected is None:
+        assert payload is None
+    else:
+        exp_ctx, exp_window = expected
+        assert payload is not None
+        assert payload["code_predictor_codes"][0] == exp_ctx
+        assert len(payload["code_predictor_codes"]) == 1 + _Q * exp_window
