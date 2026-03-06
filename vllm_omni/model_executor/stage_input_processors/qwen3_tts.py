@@ -5,6 +5,10 @@ from typing import Any
 import torch
 from vllm.logger import init_logger
 
+from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
+    compute_dynamic_initial_chunk_size,
+)
+
 logger = init_logger(__name__)
 
 
@@ -46,7 +50,8 @@ def talker2code2wav_async_chunk(
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
     initial_chunk_size = int(cfg.get("initial_codec_chunk_frames", 0))
-    # Per-request override (takes priority over stage config)
+    # Per-request override (takes priority over stage config and dynamic)
+    per_request_override = False
     additional_information = getattr(request, "additional_information", None)
     if (
         additional_information is not None
@@ -56,6 +61,12 @@ def talker2code2wav_async_chunk(
         entry = additional_information.entries["initial_codec_chunk_frames"]
         if entry.list_data is not None and len(entry.list_data) == 1:
             initial_chunk_size = int(entry.list_data[0])
+            per_request_override = True
+    # Dynamic IC: scale based on load when configured and no per-request override.
+    if not per_request_override and 0 < initial_chunk_size < chunk_size:
+        active = len(transfer_manager.code_prompt_token_ids)
+        capacity = getattr(transfer_manager, "scheduler_max_num_seqs", 1)
+        initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, initial_chunk_size)
     if chunk_size <= 0 or left_context_size_config < 0 or initial_chunk_size < 0:
         raise ValueError(
             f"Invalid codec chunk config: codec_chunk_frames={chunk_size}, "
