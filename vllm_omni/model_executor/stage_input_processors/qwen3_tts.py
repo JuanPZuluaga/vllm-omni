@@ -93,11 +93,14 @@ def talker2code2wav_async_chunk(
         if entry.list_data is not None and len(entry.list_data) == 1:
             initial_chunk_size = int(entry.list_data[0])
             per_request_override = True
-    # Dynamic IC: scale based on load when configured and no per-request override.
+    # Dynamic IC: recomputed every call so IC adapts to current load mid-request.
     if not per_request_override and 0 < initial_chunk_size < chunk_size:
-        active = len(transfer_manager.code_prompt_token_ids)
+        active = sum(1 for v in transfer_manager.code_prompt_token_ids.values() if v)
         capacity = getattr(transfer_manager, "scheduler_max_num_seqs", 1)
         initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, initial_chunk_size)
+        logger.debug(
+            "Dynamic IC: active=%d, capacity=%d, ic=%d, req=%s", active, capacity, initial_chunk_size, request_id
+        )
     if chunk_size <= 0 or left_context_size_config < 0 or initial_chunk_size < 0:
         raise ValueError(
             f"Invalid codec chunk config: codec_chunk_frames={chunk_size}, "
@@ -113,8 +116,6 @@ def talker2code2wav_async_chunk(
         initial_chunk_size = chunk_size
     length = len(transfer_manager.code_prompt_token_ids[request_id])
 
-    # Avoid emitting empty chunks during normal streaming. If the request is
-    # finished and nothing was produced, emit an EOF marker.
     if length <= 0:
         if finished:
             return {
@@ -123,34 +124,21 @@ def talker2code2wav_async_chunk(
             }
         return None
 
-    in_initial_phase = initial_chunk_size > 0 and length <= chunk_size
+    # Initial phase (length < chunk_size): emit at IC boundaries with smaller chunks.
+    # Normal phase (length >= chunk_size): standard chunk_size cadence.
+    # Both use the same sliding window — no per-request state needed.
+    in_initial_phase = initial_chunk_size > 0 and initial_chunk_size < chunk_size and length < chunk_size
+    effective_chunk = initial_chunk_size if in_initial_phase else chunk_size
 
-    if in_initial_phase:
-        # Initial-chunk phase: emit every initial_chunk_size frames with full accumulated context.
-        already_sent = transfer_manager.put_req_chunk[request_id] * initial_chunk_size
-        pending = length - already_sent
-        if pending <= 0:
-            return None
-        if pending < initial_chunk_size and not finished:
-            return None
-        context_length = min(pending, initial_chunk_size)
-        end_index = length
-        left_context_size = max(0, length - context_length)
-        window_frames = transfer_manager.code_prompt_token_ids[request_id][:length]
-    else:
-        # Normal phase: standard chunk_size cadence with left_context sliding window.
-        # Offset by initial_coverage so normal starts from where the initial-chunk phase left off.
-        initial_coverage = (chunk_size // initial_chunk_size) * initial_chunk_size if initial_chunk_size > 0 else 0
-        adjusted = length - initial_coverage
-        chunk_length = adjusted % chunk_size
-        if chunk_length != 0 and not finished:
-            return None
-        context_length = chunk_length if chunk_length != 0 else chunk_size
-        end_index = min(length, left_context_size_config + context_length)
-        left_context_size = max(0, int(end_index - context_length))
-        window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
+    if not finished and length % effective_chunk != 0:
+        return None
 
-    # Pack context + chunk into codebook-major flat codes for adapter.
+    # On finish, flush whatever remains.
+    context_length = length % effective_chunk if (finished and length % effective_chunk != 0) else effective_chunk
+    end_index = min(length, left_context_size_config + context_length)
+    left_context_size = max(0, end_index - context_length)
+    window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
+
     code_predictor_codes = torch.tensor(window_frames).transpose(0, 1).reshape(-1).tolist()
 
     return {
