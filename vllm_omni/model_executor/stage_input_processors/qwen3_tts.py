@@ -81,9 +81,11 @@ def talker2code2wav_async_chunk(
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
     initial_chunk_size = int(cfg.get("initial_codec_chunk_frames", 0))
+
     # Per-request override (takes priority over stage config and dynamic)
     per_request_override = False
     additional_information = getattr(request, "additional_information", None)
+
     if (
         additional_information is not None
         and hasattr(additional_information, "entries")
@@ -93,20 +95,23 @@ def talker2code2wav_async_chunk(
         if entry.list_data is not None and len(entry.list_data) == 1:
             initial_chunk_size = int(entry.list_data[0])
             per_request_override = True
+
     # Dynamic IC: recomputed every call so IC adapts to current load mid-request.
     if not per_request_override and 0 < initial_chunk_size < chunk_size:
-        active = sum(1 for v in transfer_manager.code_prompt_token_ids.values() if v)
+        active = sum(1 for v in transfer_manager.code_prompt_token_ids.values() if 0 < len(v) < chunk_size)
         capacity = getattr(transfer_manager, "scheduler_max_num_seqs", 1)
         initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, initial_chunk_size)
         logger.debug(
             "Dynamic IC: active=%d, capacity=%d, ic=%d, req=%s", active, capacity, initial_chunk_size, request_id
         )
+
     if chunk_size <= 0 or left_context_size_config < 0 or initial_chunk_size < 0:
         raise ValueError(
             f"Invalid codec chunk config: codec_chunk_frames={chunk_size}, "
             f"codec_left_context_frames={left_context_size_config}, "
             f"initial_codec_chunk_frames={initial_chunk_size}"
         )
+
     if initial_chunk_size > chunk_size:
         logger.warning(
             "initial_codec_chunk_frames=%d > codec_chunk_frames=%d, clamping to codec_chunk_frames.",
