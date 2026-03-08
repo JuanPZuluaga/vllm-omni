@@ -7,6 +7,7 @@ from vllm.logger import init_logger
 
 from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     compute_dynamic_initial_chunk_size,
+    max_ic_for_chunk_size,
 )
 
 logger = init_logger(__name__)
@@ -80,10 +81,9 @@ def talker2code2wav_async_chunk(
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
-    initial_chunk_size = int(cfg.get("initial_codec_chunk_frames", 0))
-
-    # Per-request override (takes priority over stage config and dynamic)
+    # Per-request override takes priority over dynamic IC.
     per_request_override = False
+    initial_chunk_size = 0
     additional_information = getattr(request, "additional_information", None)
 
     if (
@@ -96,13 +96,19 @@ def talker2code2wav_async_chunk(
             initial_chunk_size = int(entry.list_data[0])
             per_request_override = True
 
-    # Dynamic IC: recomputed every call so IC adapts to current load mid-request.
-    if not per_request_override and 0 < initial_chunk_size < chunk_size:
+    # Dynamic IC: always derived from chunk_size, recomputed every call to adapt to load.
+    if not per_request_override:
+        max_ic = max_ic_for_chunk_size(chunk_size)
         active = sum(1 for v in transfer_manager.code_prompt_token_ids.values() if 0 < len(v) < chunk_size)
         capacity = getattr(transfer_manager, "scheduler_max_num_seqs", 1)
-        initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, initial_chunk_size)
+        initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, max_ic)
         logger.debug(
-            "Dynamic IC: active=%d, capacity=%d, ic=%d, req=%s", active, capacity, initial_chunk_size, request_id
+            "Dynamic IC: active=%d, capacity=%d, max_ic=%d, ic=%d, req=%s",
+            active,
+            capacity,
+            max_ic,
+            initial_chunk_size,
+            request_id,
         )
 
     if chunk_size <= 0 or left_context_size_config < 0 or initial_chunk_size < 0:
