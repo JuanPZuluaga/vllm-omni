@@ -9,6 +9,7 @@ import torch
 
 from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     compute_dynamic_initial_chunk_size,
+    max_ic_for_chunk_size,
 )
 from vllm_omni.model_executor.stage_input_processors.qwen3_tts import talker2code2wav_async_chunk
 
@@ -28,17 +29,15 @@ def _req(rid: str, *, finished: bool, initial_codec_chunk_frames: int | None = N
     )
 
 
-def _tm(*, chunk_frames=25, left_context=25, initial_chunk=0, max_num_seqs=1):
+def _tm(*, chunk_frames=25, left_context=25, max_num_seqs=1):
     return SimpleNamespace(
         code_prompt_token_ids=defaultdict(list),
-        put_req_chunk=defaultdict(int),
         scheduler_max_num_seqs=max_num_seqs,
         connector=SimpleNamespace(
             config={
                 "extra": {
                     "codec_chunk_frames": chunk_frames,
                     "codec_left_context_frames": left_context,
-                    "initial_codec_chunk_frames": initial_chunk,
                 }
             }
         ),
@@ -128,41 +127,36 @@ def test_streaming_phases(config, n_frames, finished, expected):
 
 
 def test_per_request_override_activates_initial_phase():
-    tm = _tm(initial_chunk=0)
+    tm = _tm()
     payload = _call(tm, "r-override", n_frames=10, req_ic=10)
     assert payload is not None
     assert payload["left_context_size"] == 0
     assert len(payload["code_predictor_codes"]) == _Q * 10
 
 
-def test_per_request_override_wins_over_stage_config():
-    tm = _tm(initial_chunk=5)
+def test_per_request_override_wins_over_dynamic():
+    tm = _tm()
     payload = _call(tm, "r-override2", n_frames=10, req_ic=15)
     assert payload is None
 
 
 def test_per_request_override_bypasses_dynamic():
-    tm = _tm(initial_chunk=10, max_num_seqs=4)
+    tm = _tm(max_num_seqs=4)
     payload = _call(tm, "r", n_frames=10, req_ic=10)
     assert payload is not None
     assert len(payload["code_predictor_codes"]) == _Q * 10
 
 
-def test_dynamic_disabled_when_ic_zero():
-    tm = _tm(initial_chunk=0, max_num_seqs=4)
-    payload = _call(tm, "r", n_frames=10)
-    assert payload is None
-
-
 def test_dynamic_ic_adapts_mid_request():
-    # First call: 1 active, IC=2, length=2, 2%2=0, emit
-    tm = _tm(initial_chunk=10, max_num_seqs=4)
+    # chunk_size=25 → max_ic=16, steps=[2,4,8,16]
+    # p1: active=1 (this request), capacity=8 → load=0.125 → idx=round(0.375)=0 → IC=2 → emit at 2
+    tm = _tm(max_num_seqs=8)
     p1 = _call(tm, "r", n_frames=2)
     assert p1 is not None
     assert len(p1["code_predictor_codes"]) == _Q * 2
 
-    # Load increases, 4 active, IC=8, length=8, 8%8=0, emit
-    for i in range(3):
+    # Load increases: active=5 (r + 4 others), capacity=8 → load=0.625 → idx=round(1.875)=2 → IC=8
+    for i in range(4):
         tm.code_prompt_token_ids[f"other-{i}"] = [[0]]
     p2 = _call(tm, "r", n_frames=8)
     assert p2 is not None
@@ -182,3 +176,19 @@ def test_dynamic_ic_adapts_mid_request():
 )
 def test_compute_dynamic_initial_chunk_size(active, max_bs, max_ic, expected):
     assert compute_dynamic_initial_chunk_size(active, max_bs, max_ic) == expected
+
+
+@pytest.mark.parametrize(
+    "chunk_size,expected",
+    [
+        (25, 16),
+        (50, 32),
+        (70, 64),
+        (8, 4),
+        (4, 2),
+        (2, 1),
+        (1, 1),
+    ],
+)
+def test_max_ic_for_chunk_size(chunk_size, expected):
+    assert max_ic_for_chunk_size(chunk_size) == expected
