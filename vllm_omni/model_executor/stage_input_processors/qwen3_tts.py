@@ -99,7 +99,7 @@ def talker2code2wav_async_chunk(
     # Dynamic IC: always derived from chunk_size, recomputed every call to adapt to load.
     if not per_request_override:
         max_ic = max_ic_for_chunk_size(chunk_size)
-        active = sum(1 for v in transfer_manager.code_prompt_token_ids.values() if 0 < len(v) < chunk_size)
+        active = sum(1 for v in transfer_manager.code_prompt_token_ids.values() if len(v) > 0)
         capacity = getattr(transfer_manager, "scheduler_max_num_seqs", 1)
         initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, max_ic)
         logger.debug(
@@ -135,17 +135,27 @@ def talker2code2wav_async_chunk(
             }
         return None
 
-    # Initial phase (length < chunk_size): emit at IC boundaries with smaller chunks.
-    # Normal phase (length >= chunk_size): standard chunk_size cadence.
-    # Both use the same sliding window — no per-request state needed.
     in_initial_phase = initial_chunk_size > 0 and initial_chunk_size < chunk_size and length < chunk_size
-    effective_chunk = initial_chunk_size if in_initial_phase else chunk_size
 
-    if not finished and length % effective_chunk != 0:
-        return None
+    if in_initial_phase:
+        # IC phase: emit every initial_chunk_size frames with growing left context.
+        if not finished and length % initial_chunk_size != 0:
+            return None
+        context_length = (
+            length % initial_chunk_size if (finished and length % initial_chunk_size != 0) else initial_chunk_size
+        )
+    else:
+        # Normal phase: offset by initial_coverage so the first normal emit
+        # picks up where the IC phase left off, avoiding replay.
+        initial_coverage = (
+            (chunk_size // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
+        )
+        adjusted = length - initial_coverage
+        if not finished and adjusted % chunk_size != 0:
+            return None
+        chunk_length = adjusted % chunk_size
+        context_length = chunk_length if chunk_length != 0 else chunk_size
 
-    # On finish, flush whatever remains.
-    context_length = length % effective_chunk if (finished and length % effective_chunk != 0) else effective_chunk
     end_index = min(length, left_context_size_config + context_length)
     left_context_size = max(0, end_index - context_length)
     window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
