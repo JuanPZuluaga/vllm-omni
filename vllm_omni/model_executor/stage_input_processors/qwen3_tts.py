@@ -131,7 +131,6 @@ def talker2code2wav_async_chunk(
 
     if length <= 0:
         if finished:
-            transfer_manager.code_prompt_token_ids.pop(request_id, None)
             return {
                 "code_predictor_codes": [],
                 "finished": torch.tensor(True, dtype=torch.bool),
@@ -164,9 +163,6 @@ def talker2code2wav_async_chunk(
     window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
 
     code_predictor_codes = torch.tensor(window_frames).transpose(0, 1).reshape(-1).tolist()
-
-    if finished:
-        transfer_manager.code_prompt_token_ids.pop(request_id, None)
 
     return {
         "code_predictor_codes": code_predictor_codes,
