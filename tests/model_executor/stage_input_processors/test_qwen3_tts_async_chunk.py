@@ -11,7 +11,10 @@ from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
     compute_dynamic_initial_chunk_size,
     max_ic_for_chunk_size,
 )
-from vllm_omni.model_executor.stage_input_processors.qwen3_tts import talker2code2wav_async_chunk
+from vllm_omni.model_executor.stage_input_processors.qwen3_tts import (
+    talker2code2wav,
+    talker2code2wav_async_chunk,
+)
 
 _FRAME = [1, 2, 3, 4]
 _Q = len(_FRAME)
@@ -33,6 +36,8 @@ def _tm(*, chunk_frames=25, left_context=25, max_num_seqs=1):
     return SimpleNamespace(
         code_prompt_token_ids=defaultdict(list),
         scheduler_max_num_seqs=max_num_seqs,
+        put_req_chunk=defaultdict(int),
+        request_payload={},
         connector=SimpleNamespace(
             config={
                 "extra": {
@@ -202,3 +207,113 @@ def test_compute_dynamic_initial_chunk_size(active, max_bs, max_ic, expected):
 )
 def test_max_ic_for_chunk_size(chunk_size, expected):
     assert max_ic_for_chunk_size(chunk_size) == expected
+
+
+def test_first_streaming_chunk_prepends_ref_code_context():
+    tm = _tm()
+    rid = "r-ref"
+    tm.code_prompt_token_ids[rid] = [_FRAME[:] for _ in range(10)]
+    ref_code = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)
+
+    payload = talker2code2wav_async_chunk(
+        transfer_manager=tm,
+        pooling_output={"audio_codes": torch.zeros((0,)), "ref_code": ref_code},
+        request=_req(rid, finished=False, initial_codec_chunk_frames=10),
+        is_finished=False,
+    )
+
+    assert payload is not None
+    assert payload["left_context_size"] == 2
+    assert len(payload["code_predictor_codes"]) == _Q * 12
+
+
+def test_ref_code_context_only_applies_to_first_streaming_chunk():
+    tm = _tm()
+    rid = "r-ref2"
+    tm.code_prompt_token_ids[rid] = [_FRAME[:] for _ in range(20)]
+    tm.put_req_chunk[rid] = 1
+    ref_code = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)
+
+    payload = talker2code2wav_async_chunk(
+        transfer_manager=tm,
+        pooling_output={"audio_codes": torch.zeros((0,)), "ref_code": ref_code},
+        request=_req(rid, finished=False, initial_codec_chunk_frames=10),
+        is_finished=False,
+    )
+
+    assert payload is not None
+    assert payload["left_context_size"] == 10
+    assert len(payload["code_predictor_codes"]) == _Q * 20
+
+
+def test_ref_code_context_can_be_buffered_before_first_emit():
+    tm = _tm()
+    rid = "r-ref-buffered"
+    ref_code = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)
+
+    first_payload = talker2code2wav_async_chunk(
+        transfer_manager=tm,
+        pooling_output={"audio_codes": torch.tensor([[1, 2, 3, 4]]), "ref_code": ref_code},
+        request=_req(rid, finished=False, initial_codec_chunk_frames=10),
+        is_finished=False,
+    )
+    assert first_payload is None
+    assert rid in tm.request_payload
+
+    for _ in range(8):
+        talker2code2wav_async_chunk(
+            transfer_manager=tm,
+            pooling_output={"audio_codes": torch.tensor([[1, 2, 3, 4]])},
+            request=_req(rid, finished=False, initial_codec_chunk_frames=10),
+            is_finished=False,
+        )
+
+    payload = talker2code2wav_async_chunk(
+        transfer_manager=tm,
+        pooling_output={"audio_codes": torch.tensor([[1, 2, 3, 4]])},
+        request=_req(rid, finished=False, initial_codec_chunk_frames=10),
+        is_finished=False,
+    )
+
+    assert payload is not None
+    assert payload["left_context_size"] == 2
+    assert len(payload["code_predictor_codes"]) == _Q * 12
+    assert rid not in tm.request_payload
+
+
+def test_non_async_processor_prepends_ref_code_and_sets_trim_context():
+    ref_code = torch.tensor([[9, 9, 9, 9], [8, 8, 8, 8]], dtype=torch.long)
+    audio_codes = torch.tensor(
+        [
+            [0, 0, 0, 0],
+            [1, 2, 3, 4],
+            [5, 6, 7, 8],
+        ],
+        dtype=torch.long,
+    )
+    output = SimpleNamespace(multimodal_output={"audio_codes": audio_codes, "ref_code": ref_code})
+    stage = SimpleNamespace(engine_outputs=[SimpleNamespace(outputs=[output])])
+
+    prompts = talker2code2wav(stage_list=[stage], engine_input_source=[0])
+
+    assert len(prompts) == 1
+    prompt = prompts[0]
+    assert prompt["additional_information"] == {"left_context_size": [2]}
+    assert prompt["prompt_token_ids"] == [
+        9,
+        8,
+        1,
+        5,
+        9,
+        8,
+        2,
+        6,
+        9,
+        8,
+        3,
+        7,
+        9,
+        8,
+        4,
+        8,
+    ]
