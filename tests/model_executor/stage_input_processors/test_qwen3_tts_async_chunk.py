@@ -17,7 +17,7 @@ _FRAME = [1, 2, 3, 4]  # 4-codebook frame
 _Q = len(_FRAME)  # num quantizers
 
 
-def _req(rid: str, *, finished: bool, initial_codec_chunk_frames: int | None = None):
+def _req(rid, *, finished, initial_codec_chunk_frames=None):
     ai = None
     if initial_codec_chunk_frames is not None:
         entry = SimpleNamespace(list_data=[initial_codec_chunk_frames])
@@ -54,67 +54,67 @@ def _call(tm, rid, *, n_frames, finished=False, req_ic=None):
     )
 
 
-def test_does_not_emit_empty_chunk_when_not_finished():
+def test_empty_returns_none():
     tm = _tm()
-    payload = talker2code2wav_async_chunk(
+    p = talker2code2wav_async_chunk(
         transfer_manager=tm,
         pooling_output={"audio_codes": torch.zeros((0,))},
-        request=_req("rid-empty", finished=False),
+        request=_req("r", finished=False),
     )
-    assert payload is None
+    assert p is None
 
 
-def test_flushes_tail_when_finished_without_pooler_output():
+def test_eof_marker_when_finished_empty():
     tm = _tm()
-    rid = "rid-tail"
-    tm.code_prompt_token_ids[rid] = [_FRAME[:] for _ in range(24)]
-    payload = talker2code2wav_async_chunk(
+    p = talker2code2wav_async_chunk(
         transfer_manager=tm,
         pooling_output=None,
-        request=_req(rid, finished=True),
+        request=_req("r", finished=True),
         is_finished=True,
     )
-    assert payload is not None
-    assert payload["finished"].item() is True
-    assert len(payload["code_predictor_codes"]) == _Q * 24
+    assert p == {"code_predictor_codes": [], "finished": torch.tensor(True, dtype=torch.bool)}
 
 
-def test_emits_eof_marker_when_finished_with_no_frames():
+def test_flush_on_finish():
     tm = _tm()
-    payload = talker2code2wav_async_chunk(
+    tm.code_prompt_token_ids["r"] = [_FRAME[:] for _ in range(24)]
+    p = talker2code2wav_async_chunk(
         transfer_manager=tm,
         pooling_output=None,
-        request=_req("rid-eof", finished=True),
+        request=_req("r", finished=True),
         is_finished=True,
     )
-    assert payload == {
-        "code_predictor_codes": [],
-        "finished": torch.tensor(True, dtype=torch.bool),
-    }
+    assert p is not None
+    assert p["finished"].item() is True
+    assert len(p["code_predictor_codes"]) == _Q * 24
 
 
-# (chunk, lc, ic), n_frames, finished, expected (left_ctx, window_size) or None
 _CASES = [
-    # Normal path (ic=0): hold, then emit at boundary
-    ((25, 25, 0), 24, False, None),
-    ((25, 25, 0), 25, False, (0, 25)),
-    # Initial phase: hold, then emit at IC boundary
-    ((25, 25, 10), 9, False, None),
-    ((25, 25, 10), 10, False, (0, 10)),
-    # Normal phase after warmup: hold, then emit
-    ((25, 25, 10), 30, False, None),
-    ((25, 25, 10), 50, False, (25, 50)),
-    # Finished flushes IC-phase tail and normal-phase tail
-    ((25, 25, 10), 5, True, (0, 5)),
-    ((25, 25, 10), 33, True, (25, 33)),
+    # Dynamic IC=16, cs=25, initial_coverage=16
+    ((25, 25, 0), 24, False, None),  # IC phase: 24%16!=0 -> hold
+    ((25, 25, 0), 25, False, None),  # transition: adjusted=9, hold (no replay)
+    ((25, 25, 0), 41, False, (16, 41)),  # first normal emit, lc=16
+    # Per-request IC=10, cs=25, initial_coverage=20
+    ((25, 25, 10), 9, False, None),  # IC: hold
+    ((25, 25, 10), 10, False, (0, 10)),  # IC: emit at boundary
+    ((25, 25, 10), 25, False, None),  # transition: hold (no replay)
+    ((25, 25, 10), 45, False, (20, 45)),  # first normal emit, lc=20
+    ((25, 25, 10), 5, True, (0, 5)),  # finished flushes IC tail
+    ((25, 25, 10), 33, True, (20, 33)),  # finished flushes normal tail
+    # IC=8, cs=16: IC divides chunk_size evenly (edge case)
+    ((16, 25, 8), 8, False, (0, 8)),  # IC: emit
+    ((16, 25, 8), 16, False, None),  # transition: hold (no replay)
+    ((16, 25, 8), 24, False, (8, 24)),  # first normal emit, lc=8
+    # Per-request override: IC=15 at n_frames=10 -> 10%15!=0 -> hold
+    ((25, 25, 15), 10, False, None),
 ]
 
 
 @pytest.mark.parametrize("config, n_frames, finished, expected", _CASES)
 def test_streaming_phases(config, n_frames, finished, expected):
-    chunk_frames, left_context, initial_chunk = config
+    chunk_frames, left_context, req_ic_val = config
     tm = _tm(chunk_frames=chunk_frames, left_context=left_context)
-    req_ic = initial_chunk if initial_chunk > 0 else None
+    req_ic = req_ic_val if req_ic_val > 0 else None
     payload = _call(tm, "r", n_frames=n_frames, finished=finished, req_ic=req_ic)
 
     if expected is None:
@@ -126,52 +126,41 @@ def test_streaming_phases(config, n_frames, finished, expected):
         assert len(payload["code_predictor_codes"]) == _Q * exp_window
 
 
-def test_per_request_override_activates_initial_phase():
-    tm = _tm()
-    payload = _call(tm, "r-override", n_frames=10, req_ic=10)
-    assert payload is not None
-    assert payload["left_context_size"] == 0
-    assert len(payload["code_predictor_codes"]) == _Q * 10
-
-
-def test_per_request_override_wins_over_dynamic():
-    tm = _tm()
-    payload = _call(tm, "r-override2", n_frames=10, req_ic=15)
-    assert payload is None
-
-
-def test_per_request_override_bypasses_dynamic():
-    tm = _tm(max_num_seqs=4)
-    payload = _call(tm, "r", n_frames=10, req_ic=10)
-    assert payload is not None
-    assert len(payload["code_predictor_codes"]) == _Q * 10
-
-
-def test_dynamic_ic_adapts_mid_request():
-    # chunk_size=25 → max_ic=16, steps=[2,4,8,16]
-    # p1: active=1 (this request), capacity=8 → load=0.125 → idx=round(0.375)=0 → IC=2 → emit at 2
+def test_dynamic_ic_adapts_to_load():
+    # chunk_size=25 -> max_ic=16, steps=[2,4,8,16]
     tm = _tm(max_num_seqs=8)
+
+    # Low load (1/8) -> IC=2 -> emit at 2
     p1 = _call(tm, "r", n_frames=2)
     assert p1 is not None
     assert len(p1["code_predictor_codes"]) == _Q * 2
 
-    # Load increases: active=5 (r + 4 others), capacity=8 → load=0.625 → idx=round(1.875)=2 → IC=8
+    # High load: add 4 others -> active=5/8 -> IC=8 -> emit at 8
     for i in range(4):
         tm.code_prompt_token_ids[f"other-{i}"] = [[0]]
     p2 = _call(tm, "r", n_frames=8)
     assert p2 is not None
     assert len(p2["code_predictor_codes"]) == _Q * 8
 
+    # Requests past initial phase still count in load factor
+    tm2 = _tm(max_num_seqs=4)
+    for i in range(3):
+        tm2.code_prompt_token_ids[f"long-{i}"] = [[0]] * 50  # well past cs=25
+    # active=4/4=1.0 -> IC=16
+    p3 = _call(tm2, "new", n_frames=16)
+    assert p3 is not None
+    assert len(p3["code_predictor_codes"]) == _Q * 16
+
 
 @pytest.mark.parametrize(
     "active,max_bs,max_ic,expected",
     [
-        (0, 4, 32, 2),  # zero load, min step
+        (0, 4, 32, 2),  # zero load -> min step
         (2, 4, 32, 8),  # mid load
-        (4, 4, 32, 32),  # full load, cap at max_ic
-        (10, 4, 16, 16),  # over capacity, still capped
+        (4, 4, 32, 32),  # full load
+        (10, 4, 16, 16),  # over capacity, capped
         (0, 4, 1, 1),  # max_ic below min step
-        (0, 0, 16, 2),  # zero max_batch_size edge case
+        (0, 0, 16, 2),  # zero capacity edge case
     ],
 )
 def test_compute_dynamic_initial_chunk_size(active, max_bs, max_ic, expected):
