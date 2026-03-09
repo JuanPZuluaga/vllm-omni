@@ -13,8 +13,8 @@ from vllm_omni.model_executor.stage_input_processors.chunk_size_utils import (
 )
 from vllm_omni.model_executor.stage_input_processors.qwen3_tts import talker2code2wav_async_chunk
 
-_FRAME = [1, 2, 3, 4]  # 4-codebook frame
-_Q = len(_FRAME)  # num quantizers
+_FRAME = [1, 2, 3, 4]
+_Q = len(_FRAME)
 
 
 def _req(rid, *, finished, initial_codec_chunk_frames=None):
@@ -150,6 +150,27 @@ def test_dynamic_ic_adapts_to_load():
     p3 = _call(tm2, "new", n_frames=16)
     assert p3 is not None
     assert len(p3["code_predictor_codes"]) == _Q * 16
+
+
+def test_ic_load_change_mid_request():
+    """IC stateless: load spike mid-request shifts initial_coverage."""
+    tm = _tm(chunk_frames=25, left_context=25, max_num_seqs=8)
+
+    # Low load -> IC=2 -> emit at frame 2
+    p1 = _call(tm, "r", n_frames=2)
+    assert p1 is not None
+
+    # Spike load: 6 others -> IC=16 -> initial_coverage=16
+    for i in range(6):
+        tm.code_prompt_token_ids[f"other-{i}"] = [[0]] * 10
+
+    # adjusted=25-16=9, 9%25!=0 -> hold
+    assert _call(tm, "r", n_frames=25) is None
+
+    # First normal emit at 16+25=41
+    p3 = _call(tm, "r", n_frames=41)
+    assert p3 is not None
+    assert p3["left_context_size"] == 16
 
 
 @pytest.mark.parametrize(
