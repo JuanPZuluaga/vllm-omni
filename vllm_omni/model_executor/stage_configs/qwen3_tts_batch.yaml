@@ -98,9 +98,6 @@ runtime:
         # Align with Omni: small chunks with sufficient context overlap.
         codec_chunk_frames: 25
         codec_left_context_frames: 25
-        # Initial chunk size is computed dynamically based on server load
-        # (smaller IC at low load for faster TTFA, larger IC at high load).
-        # Use the per-request `initial_codec_chunk_frames` API field to override.
 
   edges:
     - from: 0
