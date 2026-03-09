@@ -103,12 +103,14 @@ def talker2code2wav_async_chunk(
         capacity = getattr(transfer_manager, "scheduler_max_num_seqs", 1)
         initial_chunk_size = compute_dynamic_initial_chunk_size(active, capacity, max_ic)
         logger.debug(
-            "Dynamic IC: active=%d, capacity=%d, max_ic=%d, ic=%d, req=%s",
+            "Dynamic IC: active=%d, capacity=%d, max_ic=%d, ic=%d, cs=%d, req=%s, keys=%d",
             active,
             capacity,
             max_ic,
             initial_chunk_size,
+            chunk_size,
             request_id,
+            len(transfer_manager.code_prompt_token_ids),
         )
 
     if chunk_size <= 0 or left_context_size_config < 0 or initial_chunk_size < 0:
@@ -129,6 +131,7 @@ def talker2code2wav_async_chunk(
 
     if length <= 0:
         if finished:
+            transfer_manager.code_prompt_token_ids.pop(request_id, None)
             return {
                 "code_predictor_codes": [],
                 "finished": torch.tensor(True, dtype=torch.bool),
@@ -148,7 +151,7 @@ def talker2code2wav_async_chunk(
         # Normal phase: offset by initial_coverage so the first normal emit
         # picks up where the IC phase left off, avoiding replay.
         initial_coverage = (
-            (chunk_size // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
+            ((chunk_size - 1) // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
         )
         adjusted = length - initial_coverage
         if not finished and adjusted % chunk_size != 0:
@@ -161,6 +164,9 @@ def talker2code2wav_async_chunk(
     window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
 
     code_predictor_codes = torch.tensor(window_frames).transpose(0, 1).reshape(-1).tolist()
+
+    if finished:
+        transfer_manager.code_prompt_token_ids.pop(request_id, None)
 
     return {
         "code_predictor_codes": code_predictor_codes,
