@@ -19,7 +19,7 @@ def talker2code2wav(
     prompt: Any = None,
     requires_multimodal_data: bool = False,
 ) -> list[Any]:
-    """Non-async processor: wait for talker to finish, then pass all codes to code2wav at once."""
+    """Non-async: collect all talker codes, then pass to code2wav at once."""
     from vllm_omni.inputs.data import OmniTokensPrompt
     from vllm_omni.model_executor.stage_input_processors.qwen3_omni import _validate_stage_inputs
 
@@ -81,6 +81,7 @@ def talker2code2wav_async_chunk(
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
+
     # Per-request override takes priority over dynamic IC.
     per_request_override = False
     initial_chunk_size = 0
@@ -147,8 +148,8 @@ def talker2code2wav_async_chunk(
             length % initial_chunk_size if (finished and length % initial_chunk_size != 0) else initial_chunk_size
         )
     else:
-        # Normal phase: offset by initial_coverage so the first normal emit
-        # picks up where the IC phase left off, avoiding replay.
+        # Normal phase: offset so the first normal emit picks up after IC phase.
+        # IC is stateless (may change with load); any mismatch is absorbed by left_context.
         initial_coverage = (
             ((chunk_size - 1) // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
         )
