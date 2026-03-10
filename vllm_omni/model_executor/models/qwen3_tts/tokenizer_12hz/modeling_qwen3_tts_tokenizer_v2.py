@@ -614,6 +614,48 @@ class SnakeBeta(nn.Module):
           https://huggingface.co/papers/2006.08195
     """
 
+    _triton_kernel = None
+
+    @staticmethod
+    def _init_triton():
+        """Load and JIT-compile the fused Triton kernel (once)."""
+        if SnakeBeta._triton_kernel is not None:
+            return True
+        try:
+            import triton
+            import triton.language as tl
+        except ImportError:
+            return False
+
+        @triton.jit
+        def _kernel(  # noqa: N803
+            x_ptr,
+            alpha_ptr,
+            beta_ptr,
+            out_ptr,
+            stride_b,
+            stride_c,
+            t_len: tl.constexpr,
+            eps: tl.constexpr,
+            block_t: tl.constexpr,
+        ):
+            """Fused SnakeBeta: x + (1/exp(β)) · sin²(x · exp(α))."""
+            bid = tl.program_id(0)
+            cid = tl.program_id(1)
+            t_off = tl.program_id(2) * block_t + tl.arange(0, block_t)
+            mask = t_off < t_len
+
+            x = tl.load(x_ptr + bid * stride_b + cid * stride_c + t_off, mask=mask)
+            alpha = tl.exp(tl.load(alpha_ptr + cid))
+            beta = tl.exp(tl.load(beta_ptr + cid))
+            sin_val = tl.sin(x * alpha)
+            result = x + (1.0 / (beta + eps)) * sin_val * sin_val
+
+            tl.store(out_ptr + bid * stride_b + cid * stride_c + t_off, result, mask=mask)
+
+        SnakeBeta._triton_kernel = _kernel
+        return True
+
     def __init__(self, in_features, alpha=1.0):
         super().__init__()
         self.in_features = in_features
@@ -630,6 +672,11 @@ class SnakeBeta(nn.Module):
         Applies the function to the input elementwise.
         SnakeBeta ∶= x + 1/b * sin^2 (xa)
         """
+        if hidden_states.is_cuda and self._init_triton():
+            return self._triton_forward(hidden_states)
+        return self._eager_forward(hidden_states)
+
+    def _eager_forward(self, hidden_states):
         alpha = self.alpha.unsqueeze(0).unsqueeze(-1)  # line up with x to [B, C, T]
         beta = self.beta.unsqueeze(0).unsqueeze(-1)
         alpha = torch.exp(alpha)
@@ -637,8 +684,26 @@ class SnakeBeta(nn.Module):
         hidden_states = hidden_states + (1.0 / (beta + self.no_div_by_zero)) * torch.pow(
             torch.sin(hidden_states * alpha), 2
         )
-
         return hidden_states
+
+    def _triton_forward(self, x):
+        import triton
+
+        B, C, T = x.shape
+        out = torch.empty_like(x)
+        block_t = min(triton.next_power_of_2(T), 1024)
+        self._triton_kernel[(B, C, triton.cdiv(T, block_t))](
+            x,
+            self.alpha,
+            self.beta,
+            out,
+            x.stride(0),
+            x.stride(1),
+            t_len=T,
+            eps=self.no_div_by_zero,
+            block_t=block_t,
+        )
+        return out
 
 
 class Qwen3TTSTokenizerV2DecoderDecoderResidualUnit(nn.Module):
@@ -880,6 +945,8 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
         self,
         capture_sizes: list[int] | None = None,
         device: torch.device | None = None,
+        codec_chunk_frames: int = 0,
+        codec_left_context_frames: int = 0,
     ):
         from ..cuda_graph_decoder_wrapper import CUDAGraphDecoderWrapper
 
@@ -894,10 +961,17 @@ class Qwen3TTSTokenizerV2Decoder(Qwen3TTSTokenizerV2DecoderPreTrainedModel):
             num_quantizers=self.config.num_quantizers,
             enabled=True,
         )
-        self._cudagraph_wrapper.warmup(device, dtype=torch.long)
+        self._cudagraph_wrapper.warmup(
+            device,
+            dtype=torch.long,
+            codec_chunk_frames=codec_chunk_frames,
+            codec_left_context_frames=codec_left_context_frames,
+        )
         self._cudagraph_enabled = True
-        sizes = self._cudagraph_wrapper.capture_sizes
-        logger.info("CUDA Graph enabled for decoder with sizes: %s", sizes)
+        logger.info(
+            "CUDA Graph enabled for decoder: seq_lens=%s",
+            self._cudagraph_wrapper.capture_sizes,
+        )
 
     def disable_cudagraph(self):
         self._cudagraph_enabled = False
