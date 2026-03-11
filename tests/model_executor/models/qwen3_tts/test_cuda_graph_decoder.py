@@ -280,11 +280,11 @@ def test_deterministic_across_calls(decoder, wrapper):
 @pytest.mark.parametrize(
     "kwargs,expected_in",
     [
-        ({}, [300, 325, 2, 32]),
-        ({"codec_chunk_frames": 33, "codec_left_context_frames": 25}, [33, 58, 300, 325]),
-        ({"decode_chunk_size": 150, "decode_left_context": 10}, [150, 160]),
+        ({}, [2, 4, 8, 16, 32, 64, 128, 156, 212, 256, 384, 512]),
+        ({"codec_chunk_frames": 33, "codec_left_context_frames": 25}, [33, 58, 64, 256, 512]),
+        ({"codec_chunk_frames": 17, "codec_left_context_frames": 25}, [17, 42, 64, 256]),
     ],
-    ids=["default", "streaming", "custom_decode"],
+    ids=["default", "streaming_c33", "streaming_c17"],
 )
 def test_compute_capture_sizes(kwargs, expected_in):
     """compute_capture_sizes produces expected sizes for various configs."""

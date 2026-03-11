@@ -29,7 +29,8 @@ class CUDAGraphDecoderWrapper:
         output = wrapper.decode(codes)  # Automatically uses CUDA graph if possible
     """
 
-    DEFAULT_CAPTURE_SIZES = [2, 4, 8, 16, 25, 32, 50, 100, 150, 200, 250, 300]
+    # Power-of-2 backbone for initial phase, low TTFC + mid-range fills to limit padding waste
+    _BASE_CAPTURE_SIZES = [2, 4, 8, 16, 32, 64, 128, 156, 212, 256, 384, 512]
 
     def __init__(
         self,
@@ -40,7 +41,7 @@ class CUDAGraphDecoderWrapper:
     ):
         self.decoder = decoder
         self._explicit_sizes = capture_sizes is not None
-        self.capture_sizes = sorted(capture_sizes or self.DEFAULT_CAPTURE_SIZES)
+        self.capture_sizes = sorted(capture_sizes) if capture_sizes else []
         self.num_quantizers = num_quantizers
         self.enabled = enabled
 
@@ -55,30 +56,15 @@ class CUDAGraphDecoderWrapper:
     def compute_capture_sizes(
         codec_chunk_frames: int = 0,
         codec_left_context_frames: int = 0,
-        decode_chunk_size: int = 300,
-        decode_left_context: int = 25,
     ) -> list[int]:
         """Compute capture sizes from chunking config for high graph hit rate."""
-        sizes: set[int] = set()
+        sizes: set[int] = set(CUDAGraphDecoderWrapper._BASE_CAPTURE_SIZES)
 
-        # Streaming sizes
+        # Exact hits for streaming steady-state (avoids padding overhead)
         if codec_chunk_frames > 0:
             sizes.add(codec_chunk_frames)
             if codec_left_context_frames > 0:
                 sizes.add(codec_chunk_frames + codec_left_context_frames)
-
-        # Non-streaming: first chunk + steady-state
-        sizes.add(decode_chunk_size)
-        sizes.add(decode_chunk_size + decode_left_context)
-
-        # Buckets for variable-length last chunks
-        step = max(decode_chunk_size // 8, 10)
-        for i in range(step, decode_chunk_size + 1, step):
-            sizes.add(i + decode_left_context)
-
-        # Power-of-2 small sizes for dynamic initial chunk sizes
-        for s in [2, 4, 8, 16, 32, 64]:
-            sizes.add(s)
 
         return sorted(sizes)
 
