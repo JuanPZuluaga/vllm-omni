@@ -278,19 +278,29 @@ def test_deterministic_across_calls(decoder, wrapper):
 
 
 @pytest.mark.parametrize(
-    "kwargs,expected_in",
+    "kwargs,expected_in,not_expected",
     [
-        ({}, [2, 4, 8, 16, 32, 64, 128, 156, 212, 256, 384, 512]),
-        ({"codec_chunk_frames": 33, "codec_left_context_frames": 25}, [33, 58, 64, 256, 512]),
-        ({"codec_chunk_frames": 17, "codec_left_context_frames": 25}, [17, 42, 64, 256]),
+        ({}, [2, 4, 8, 16, 32, 64, 128, 256, 325], [512]),
+        (
+            {"codec_chunk_frames": 33, "codec_left_context_frames": 25},
+            [2, 4, 8, 16, 32, 33, 58, 64, 128, 256, 325],
+            [512],
+        ),
+        (
+            {"codec_chunk_frames": 25, "codec_left_context_frames": 25},
+            [2, 4, 8, 16, 25, 32, 50, 64, 128, 256, 325],
+            [512],
+        ),
     ],
-    ids=["default", "streaming_c33", "streaming_c17"],
+    ids=["default", "streaming_c33", "streaming_c25"],
 )
-def test_compute_capture_sizes(kwargs, expected_in):
-    """compute_capture_sizes produces expected sizes for various configs."""
+def test_compute_capture_sizes(kwargs, expected_in, not_expected):
+    """compute_capture_sizes produces expected sizes capped by max useful size."""
     sizes = CUDAGraphDecoderWrapper.compute_capture_sizes(**kwargs)
     for val in expected_in:
         assert val in sizes, f"{val} not in {sizes}"
+    for val in not_expected:
+        assert val not in sizes, f"{val} should not be in {sizes}"
 
 
 # ──────────────────────────────────────────────────────────────────

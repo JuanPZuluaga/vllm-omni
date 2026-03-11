@@ -29,9 +29,6 @@ class CUDAGraphDecoderWrapper:
         output = wrapper.decode(codes)  # Automatically uses CUDA graph if possible
     """
 
-    # Power-of-2 backbone for initial phase, low TTFC + mid-range fills to limit padding waste
-    _BASE_CAPTURE_SIZES = [2, 4, 8, 16, 32, 64, 128, 156, 212, 256, 384, 512]
-
     def __init__(
         self,
         decoder: torch.nn.Module,
@@ -56,15 +53,26 @@ class CUDAGraphDecoderWrapper:
     def compute_capture_sizes(
         codec_chunk_frames: int = 0,
         codec_left_context_frames: int = 0,
+        decode_chunk_size: int = 300,
+        decode_left_context: int = 25,
     ) -> list[int]:
         """Compute capture sizes from chunking config for high graph hit rate."""
-        sizes: set[int] = set(CUDAGraphDecoderWrapper._BASE_CAPTURE_SIZES)
+        sizes: set[int] = set()
 
-        # Exact hits for streaming steady-state (avoids padding overhead)
+        # Streaming exact hits
         if codec_chunk_frames > 0:
             sizes.add(codec_chunk_frames)
             if codec_left_context_frames > 0:
                 sizes.add(codec_chunk_frames + codec_left_context_frames)
+
+        # Non-streaming chunked decode: full chunk + last-chunk buckets
+        non_stream_max = decode_chunk_size + decode_left_context
+        sizes.add(non_stream_max)
+
+        # Power-of-2 buckets covering both streaming IC sizes and non-streaming last-chunk sizes
+        for p2 in [2, 4, 8, 16, 32, 64, 128, 256]:
+            if p2 <= non_stream_max:
+                sizes.add(p2)
 
         return sorted(sizes)
 
