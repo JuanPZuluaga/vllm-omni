@@ -614,7 +614,7 @@ class SnakeBeta(nn.Module):
           https://huggingface.co/papers/2006.08195
     """
 
-    _triton_kernel = None
+    _triton_kernel = None  # None = untried, False = unavailable, callable = ready
 
     @staticmethod
     def _init_triton():
@@ -648,7 +648,7 @@ class SnakeBeta(nn.Module):
             mask = t_off < t_len  # guard out-of-bounds time steps
 
             # Load input tile for this (batch, channel) slice
-            x = tl.load(x_ptr + bid * stride_b + cid * stride_c + t_off, mask=mask)
+            x = tl.load(x_ptr + bid * stride_b + cid * stride_c + t_off, mask=mask, other=0.0)
             # Per-channel learned parameters (log-space → exp)
             alpha = tl.exp(tl.load(alpha_ptr + cid))
             beta = tl.exp(tl.load(beta_ptr + cid))
@@ -681,7 +681,8 @@ class SnakeBeta(nn.Module):
             try:
                 return self._triton_forward(hidden_states)
             except Exception:
-                pass
+                logger.warning("Triton SnakeBeta failed, falling back to eager", exc_info=True)
+                SnakeBeta._triton_kernel = False
         return self._eager_forward(hidden_states)
 
     def _eager_forward(self, hidden_states):
