@@ -620,11 +620,12 @@ class SnakeBeta(nn.Module):
     def _init_triton():
         """Load and JIT-compile the fused Triton kernel (once)."""
         if SnakeBeta._triton_kernel is not None:
-            return True
+            return SnakeBeta._triton_kernel is not False
         try:
             import triton
             import triton.language as tl
         except ImportError:
+            SnakeBeta._triton_kernel = False
             return False
 
         @triton.jit
@@ -640,14 +641,18 @@ class SnakeBeta(nn.Module):
             block_t: tl.constexpr,
         ):
             """Fused SnakeBeta: x + (1/exp(β)) · sin²(x · exp(α))."""
+            # Grid: (batch, channel, time_block)
             bid = tl.program_id(0)
             cid = tl.program_id(1)
             t_off = tl.program_id(2) * block_t + tl.arange(0, block_t)
-            mask = t_off < t_len
+            mask = t_off < t_len  # guard out-of-bounds time steps
 
+            # Load input tile for this (batch, channel) slice
             x = tl.load(x_ptr + bid * stride_b + cid * stride_c + t_off, mask=mask)
+            # Per-channel learned parameters (log-space → exp)
             alpha = tl.exp(tl.load(alpha_ptr + cid))
             beta = tl.exp(tl.load(beta_ptr + cid))
+            # SnakeBeta activation: x + (1/β) · sin²(x·α)
             sin_val = tl.sin(x * alpha)
             result = x + (1.0 / (beta + eps)) * sin_val * sin_val
 
@@ -672,8 +677,11 @@ class SnakeBeta(nn.Module):
         Applies the function to the input elementwise.
         SnakeBeta ∶= x + 1/b * sin^2 (xa)
         """
-        if hidden_states.is_cuda and self._init_triton():
-            return self._triton_forward(hidden_states)
+        if hidden_states.is_cuda and not torch.is_grad_enabled() and self._init_triton():
+            try:
+                return self._triton_forward(hidden_states)
+            except Exception:
+                pass
         return self._eager_forward(hidden_states)
 
     def _eager_forward(self, hidden_states):
@@ -689,6 +697,7 @@ class SnakeBeta(nn.Module):
     def _triton_forward(self, x):
         import triton
 
+        x = x.contiguous()
         B, C, T = x.shape
         out = torch.empty_like(x)
         block_t = min(triton.next_power_of_2(T), 1024)

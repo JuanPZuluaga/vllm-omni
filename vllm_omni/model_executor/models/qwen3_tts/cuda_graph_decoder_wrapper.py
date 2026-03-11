@@ -101,14 +101,13 @@ class CUDAGraphDecoderWrapper:
         self._device = device
         self.decoder.eval()
 
-        logger.info("Starting CUDA Graph warmup for %d sizes: %s", len(self.capture_sizes), self.capture_sizes)
         if not self._explicit_sizes:
             self.capture_sizes = self.compute_capture_sizes(
                 codec_chunk_frames=codec_chunk_frames,
                 codec_left_context_frames=codec_left_context_frames,
             )
 
-        logger.info("CUDA Graph warmup: %d sizes %s", len(self.capture_sizes), self.capture_sizes)
+        logger.info("Starting CUDA Graph warmup for %d sizes: %s", len(self.capture_sizes), self.capture_sizes)
 
         # Warmup runs to ensure CUDA memory is allocated
         for size in self.capture_sizes:
