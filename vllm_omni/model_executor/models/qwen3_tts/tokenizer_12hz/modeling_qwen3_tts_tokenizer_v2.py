@@ -636,7 +636,7 @@ class SnakeBeta(nn.Module):
             out_ptr,
             stride_b,
             stride_c,
-            t_len: tl.constexpr,
+            t_len,
             eps: tl.constexpr,
             block_t: tl.constexpr,
         ):
