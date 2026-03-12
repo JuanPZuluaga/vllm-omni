@@ -577,7 +577,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 take = prompt_embeds_cpu[s:e]
                 if int(take.shape[0]) < span_len:
                     pad_n = int(span_len - int(take.shape[0]))
-                    pad_rows = tts_pad_embed.reshape(1, -1).expand(pad_n, -1).to("cpu")
+                    pad_rows = tts_pad_embed.reshape(1, -1).to("cpu").expand(pad_n, -1)
                     take = torch.cat([take, pad_rows], dim=0)
                 prompt_embeds = take.to(device=input_ids.device, dtype=torch.bfloat16)
                 info_update["talker_prefill_offset"] = int(offset + span_len)
@@ -593,7 +593,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 take = prompt_embeds_cpu[s:e]
                 if int(take.shape[0]) < span_len:
                     pad_n = int(span_len - int(take.shape[0]))
-                    pad_rows = tts_pad_embed.reshape(1, -1).expand(pad_n, -1).to("cpu")
+                    pad_rows = tts_pad_embed.reshape(1, -1).to("cpu").expand(pad_n, -1)
                     take = torch.cat([take, pad_rows], dim=0)
                 prompt_embeds = take.to(device=input_ids.device, dtype=torch.bfloat16)
                 info_update = {"talker_prefill_offset": int(offset + span_len)}
@@ -650,7 +650,7 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # Stays on GPU - gpu_resident_buffer_keys avoids the CPU round-trip.
         if hidden_states.numel() == 0:
             return {}
-        return {"last_talker_hidden": hidden_states[-1, :]}
+        return {"last_talker_hidden": hidden_states[-1, :].detach()}
 
     # -------------------- prompt construction helpers --------------------
 

@@ -71,6 +71,7 @@ class OmniTransferAdapterBase:
                     self._pending_load_reqs.append(request)
                     logger.warning(f"Error receiving data for {request_id}: {e}")
 
+            # Timeout is the fallback for lock-free append/notify races.
             with self._recv_cond:
                 if not self._pending_load_reqs and not self.stop_event.is_set():
                     self._recv_cond.wait(timeout=0.1)
