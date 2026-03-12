@@ -599,7 +599,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         return None
 
-    async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple[list[float], int]:
+    async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple[np.ndarray, int]:
         """Resolve ref_audio to (wav_samples, sample_rate).
 
         Delegates to upstream vLLM's MediaConnector which handles http(s)
@@ -615,7 +615,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         wav_np = np.asarray(wav_np, dtype=np.float32)
         if wav_np.ndim > 1:
             wav_np = np.mean(wav_np, axis=-1)
-        return wav_np.tolist(), int(sr)
+        return wav_np, int(sr)
 
     async def _generate_audio_chunks(self, generator, request_id: str, response_format: str = "pcm"):
         """Generate audio chunks for streaming response.
@@ -794,8 +794,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
             tts_params = self._build_tts_params(request)
             if request.ref_audio is not None:
-                wav_list, sr = await self._resolve_ref_audio(request.ref_audio)
-                tts_params["ref_audio"] = [[wav_list, sr]]
+                wav_np, sr = await self._resolve_ref_audio(request.ref_audio)
+                tts_params["ref_audio"] = [(wav_np, sr)]
 
             ph_len = self._estimate_prompt_len(tts_params)
             prompt = {"prompt_token_ids": [1] * ph_len, "additional_information": tts_params}
