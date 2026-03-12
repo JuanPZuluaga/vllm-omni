@@ -128,3 +128,8 @@ class OmniTransferAdapterBase:
             self._recv_cond.notify_all()
         with self._save_cond:
             self._save_cond.notify_all()
+        if self.connector is not None:
+            try:
+                self.connector.close()
+            except Exception:
+                pass
