@@ -364,6 +364,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     async def upload_voice(
         self, audio_file: UploadFile, consent: str, name: str, *, ref_text: str | None = None
     ) -> dict:
+        # Normalize ref_text: treat whitespace-only as absent
+        if ref_text is not None:
+            ref_text = ref_text.strip() or None
         # Validate file size (max 10MB)
         MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
         audio_file.file.seek(0, 2)  # Seek to end
@@ -677,8 +680,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 f"Reference audio too short ({duration:.1f}s). "
                 "At least 1s of clear speech is required for speaker embedding."
             )
-        if duration > 20.0:
-            raise ValueError(f"Reference audio too long ({duration:.1f}s). Maximum 20s supported — use a shorter clip.")
+        if duration > 30.0:
+            raise ValueError(f"Reference audio too long ({duration:.1f}s). Maximum 30s supported — use a shorter clip.")
         return wav_np.tolist(), sr
 
     async def _generate_audio_chunks(self, generator, request_id: str, response_format: str = "pcm"):
