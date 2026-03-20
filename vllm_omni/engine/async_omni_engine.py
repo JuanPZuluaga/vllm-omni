@@ -532,6 +532,8 @@ class AsyncOmniEngine:
             supported_tasks.add("generate")
         if any(metadata.get("final_output_type") == "audio" for metadata in stage_metadata):
             supported_tasks.add("speech")
+            # TTS stage-0 is an AR model, so we need to add generate
+            supported_tasks.add("generate")
         self.supported_tasks = tuple(supported_tasks) if supported_tasks else ("generate",)
 
         self.default_sampling_params_list = default_sampling_params_list
