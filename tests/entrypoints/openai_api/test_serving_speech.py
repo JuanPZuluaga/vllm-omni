@@ -233,9 +233,14 @@ def test_app(mocker: MockerFixture):
     app.add_api_route("/v1/audio/voices", list_voices, methods=["GET"])
 
     # Add upload_voice endpoint
-    async def upload_voice(audio_sample: UploadFile = File(...), consent: str = Form(...), name: str = Form(...)):
+    async def upload_voice(
+        audio_sample: UploadFile = File(...),
+        consent: str = Form(...),
+        name: str = Form(...),
+        ref_text: str = Form(None),
+    ):
         try:
-            result = await speech_server.upload_voice(audio_sample, consent, name)
+            result = await speech_server.upload_voice(audio_sample, consent, name, ref_text=ref_text)
             return {"success": True, "voice": result}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
