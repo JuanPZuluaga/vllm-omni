@@ -978,6 +978,7 @@ async def upload_voice(
     audio_sample: UploadFile = File(...),
     consent: str = Form(...),
     name: str = Form(...),
+    ref_text: str = Form(None),
 ):
     """Upload a new voice sample for voice cloning.
 
@@ -999,8 +1000,7 @@ async def upload_voice(
         return base(raw_request).create_error_response(message="The model does not support Speech API")
 
     try:
-        # Upload the voice
-        result = await handler.upload_voice(audio_sample, consent, name)
+        result = await handler.upload_voice(audio_sample, consent, name, ref_text=ref_text)
 
         return JSONResponse(content={"success": True, "voice": result})
 
