@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import json
 import math
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import soundfile as sf
 from fastapi import Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from transformers.utils.hub import cached_file
@@ -441,10 +443,27 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if not _validate_path_within_directory(file_path, self.uploaded_speakers_dir):
             raise ValueError("Invalid file path: potential path traversal attack detected")
 
+        # Read content and validate duration before saving
+        content = await audio_file.read()
+        try:
+            wav_np, sr = sf.read(io.BytesIO(content))
+            duration = len(wav_np) / sr if sr > 0 else 0.0
+            if duration < 1.0:
+                raise ValueError(
+                    f"Reference audio too short ({duration:.1f}s). At least 1s of clear speech is required."
+                )
+            if duration > 30.0:
+                raise ValueError(
+                    f"Reference audio too long ({duration:.1f}s). Maximum 30s supported — use a shorter clip."
+                )
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.warning("Could not validate audio duration: %s", e)
+
         # Save audio file
         try:
             with open(file_path, "wb") as f:
-                content = await audio_file.read()
                 f.write(content)
         except Exception as e:
             raise ValueError(f"Failed to save audio file: {e}")

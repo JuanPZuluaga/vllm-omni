@@ -369,6 +369,7 @@ class TestSpeechAPI:
         result = response.json()
         assert result["success"] is True
         assert result["voice"]["name"] == "test_voice_rt"
+        assert result["voice"].get("ref_text") == "Hello world transcript"
         response = client.delete("/v1/audio/voices/test_voice_rt")
 
     def test_upload_voice_file_too_large(self, client):

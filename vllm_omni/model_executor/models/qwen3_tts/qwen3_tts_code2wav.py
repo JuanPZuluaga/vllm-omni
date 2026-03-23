@@ -228,7 +228,7 @@ class Qwen3TTSCode2Wav(nn.Module):
             flat = req_ids
             n = flat.numel()
             if n == 0 or n % q != 0:
-                if n > 1:
+                if n > 0:
                     logger.warning(
                         "Code2Wav input_ids length %d not divisible by num_quantizers %d; skipping malformed request.",
                         n,
