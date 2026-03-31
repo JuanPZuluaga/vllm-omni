@@ -355,6 +355,17 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         # Model forward (optionally compiled)
         self._model_fwd: object | None = None
 
+        # Pre-allocated projection buffer (lazily initialized)
+        self._proj_buf: torch.Tensor | None = None
+
+        # Bucket state for torch.compile warmup (no manual CUDA graphs —
+        # vLLM V1 handles graph capture for the Talker stage itself)
+        self._bucket_sizes: list[int] = []
+        self._bucket_pos_ids: dict[int, torch.Tensor] = {}
+
+        # Store vllm_config for buffer sizing
+        self._vllm_config = vllm_config
+
     def set_sampling_params(self, top_k: int = 50, top_p: float = 0.8):
         """Configure sampling parameters to maintain consistency with previous implementation."""
         self._top_k = top_k
@@ -378,25 +389,72 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         self._lm_heads = list(self.lm_head)
         self._codec_embeds = list(self.model.codec_embedding)
 
-    def _ensure_model_fwd(self) -> None:
+    def _ensure_buffers(self, device: torch.device, dtype: torch.dtype, min_bsz: int = 0) -> None:
+        """Pre-allocate projection buffer sized to max(max_num_seqs, min_bsz)."""
+        max_seq = self.num_code_groups + 1
+        max_bsz = max(self._vllm_config.scheduler_config.max_num_seqs, min_bsz)
+        if (
+            self._proj_buf is not None
+            and self._proj_buf.device == device
+            and self._proj_buf.dtype == dtype
+            and self._proj_buf.shape[0] >= max_bsz
+        ):
+            return
+        self._proj_buf = torch.zeros(
+            max_bsz,
+            max_seq,
+            self._hidden_size,
+            dtype=dtype,
+            device=device,
+        )
+
+    def _setup_compile(self) -> None:
+        """Set up torch.compile(dynamic=False) with power-of-2 bucket warmup."""
         if self._model_fwd is not None:
             return
-        if current_omni_platform.supports_torch_inductor():
-            # torch.compile fuses RMSNorm/RoPE in ways that lose float32
-            # precision, compounding across AR steps. Use epilogue_fusion=False
-            # to disable the problematic fusions while still getting kernel
-            # fusion benefits for the linear layers and SDPA.
-            self._model_fwd = torch.compile(
-                self.model.forward,
-                dynamic=True,
-                options={
-                    "epilogue_fusion": False,
-                },
-            )
-            logger.info("code_predictor: torch.compile enabled (no epilogue fusion)")
-        else:
+        if not current_omni_platform.supports_torch_inductor():
+            logger.warning_once("code_predictor: torch.compile disabled")
             self._model_fwd = self.model.forward
-            logger.info("code_predictor: using eager mode (no torch.compile)")
+            return
+
+        # epilogue_fusion=False avoids RMSNorm/RoPE fusions that lose float32
+        # precision across AR steps. dynamic=False with bucket warmup
+        # front-loads all Inductor compilations at startup.
+        self._model_fwd = torch.compile(
+            self.model.forward,
+            dynamic=False,
+            options={"epilogue_fusion": False},
+        )
+        self._warmup_buckets()
+        logger.info("code_predictor: torch.compile (dynamic=False, no epilogue fusion)")
+
+    def _padded_bsz(self, bsz: int) -> int:
+        """Round batch size up to nearest power-of-2 bucket."""
+        for bucket in self._bucket_sizes:
+            if bsz <= bucket:
+                return bucket
+        return bsz
+
+    def _warmup_buckets(self) -> None:
+        """Warmup power-of-2 batch-size buckets to front-load Inductor compilation."""
+        max_bsz = self._vllm_config.scheduler_config.max_num_seqs
+        bucket_sizes = [1 << i for i in range(max_bsz.bit_length()) if (1 << i) <= max_bsz]
+        if max_bsz not in bucket_sizes:
+            bucket_sizes.append(max_bsz)
+        self._bucket_sizes = sorted(bucket_sizes)
+
+        max_seq = self.num_code_groups + 1
+        device = next(self.model.parameters()).device
+        base_pos = torch.arange(max_seq, device=device, dtype=torch.long)
+
+        proj_buf = self._proj_buf
+        for bsz in self._bucket_sizes:
+            # 2D pos_ids: (bsz, max_seq) for HF-style RoPE
+            pos_ids = base_pos.unsqueeze(0).expand(bsz, -1).contiguous()
+            self._bucket_pos_ids[bsz] = pos_ids
+            for _ in range(3):
+                self._model_fwd(proj_buf[:bsz, :max_seq, :], pos_ids)
+        logger.info("code_predictor: warmup done for buckets %s", self._bucket_sizes)
 
     # ------------------------------------------------------------------
     #  Forward -- re-prefill + inline sampling
@@ -409,34 +467,20 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         layer0_embed: torch.Tensor,
         last_talker_hidden: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Predict residual codebooks 1..G-1 autoregressively via re-prefill.
-
-        Args:
-            layer0_code:        [bsz, 1]  int64
-            layer0_embed:       [bsz, 1, hidden_size]
-            last_talker_hidden: [bsz, 1, hidden_size]
-
-        Returns:
-            all_codes: [bsz, num_code_groups, 1]
-            proj_buf:  [bsz, num_code_groups + 1, hidden_size]
-                pos 0   = last_talker_hidden (NOT a codec embed)
-                pos 1   = layer0_embed
-                pos 2.. = `codec_embedding[i](predicted_code_i)`
-        """
+        """Predict residual codebooks 1..G-1 autoregressively via re-prefill."""
         bsz = int(layer0_code.shape[0])
         device = layer0_code.device
         dtype = last_talker_hidden.dtype
         num_groups = self.num_code_groups
 
-        # Lazy init (read-only caches only)
+        # Lazy init
         self._ensure_pos_ids(device)
-        self._ensure_model_fwd()
+        self._ensure_buffers(device, dtype, min_bsz=bsz)
+        self._setup_compile()
         self._ensure_cached_refs()
 
-        # Allocate proj_buf locally each call to avoid cross-call aliasing
+        proj_buf = self._proj_buf
         max_seq = num_groups + 1
-        proj_buf = torch.zeros(bsz, max_seq, self._hidden_size, dtype=dtype, device=device)
-        pos_ids = self._pos_ids
         model_fwd = self._model_fwd
         lm_heads = self._lm_heads
         codec_embeds = self._codec_embeds
@@ -445,41 +489,49 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         all_codes = torch.empty(bsz, num_groups, 1, dtype=torch.int64, device=device)
         all_codes[:, 0] = layer0_code
 
+        # Pad batch to nearest bucket and zero the buffer
+        padded_bsz = self._padded_bsz(bsz)
+        proj_buf[:padded_bsz].zero_()
+
         # Fill buffer positions 0 & 1
         proj_buf[:bsz, 0:1, :] = last_talker_hidden
         proj_buf[:bsz, 1:2, :] = layer0_embed
 
-        # Autoregressive loop: predict layers 1..G-1
-        for step in range(1, num_groups):
-            seq_len = step + 1
-            projected = proj_buf[:bsz, :seq_len, :]
-            # position_ids: [batch, seq_len] for HF-style RoPE
-            step_pos_ids = pos_ids[:, :seq_len].expand(bsz, -1)
+        # Get pre-computed pos_ids for this bucket
+        full_pos_ids = self._bucket_pos_ids.get(padded_bsz)
+        if full_pos_ids is None:
+            # Fallback for non-bucketed sizes
+            base_pos = torch.arange(max_seq, device=device, dtype=torch.long)
+            full_pos_ids = base_pos.unsqueeze(0).expand(padded_bsz, -1).contiguous()
 
-            hidden_out = model_fwd(projected, step_pos_ids)
+        # Autoregressive loop: predict layers 1..G-1
+        # Uses compiled forward with fixed-shape buckets. vLLM V1 handles
+        # CUDA graph capture at the Talker stage level.
+        for step in range(1, num_groups):
+            hidden_out = model_fwd(proj_buf[:padded_bsz, :max_seq, :], full_pos_ids)
 
             # Inline sampling: top-k -> top-p -> softmax -> multinomial
-            logits = lm_heads[step - 1](hidden_out[:, -1, :])  # [bsz, vocab]
+            logits = lm_heads[step - 1](hidden_out[:bsz, step, :])
             if self._top_k > 0:
                 topk_vals, _ = logits.topk(self._top_k, dim=-1)
                 logits = logits.masked_fill(logits < topk_vals[:, -1:], float("-inf"))
             if self._top_p < 1.0:
                 sorted_logits, sorted_idx = logits.sort(dim=-1, descending=True)
-                cumulative_probs = F.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
-                # Remove tokens with cumulative probability above top_p
-                remove_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= self._top_p
+                sorted_probs = F.softmax(sorted_logits, dim=-1)
+                cumulative_probs = sorted_probs.cumsum(dim=-1)
+                remove_mask = (cumulative_probs - sorted_probs) >= self._top_p
                 sorted_logits[remove_mask] = float("-inf")
                 logits = sorted_logits.scatter(1, sorted_idx, sorted_logits)
             probs = F.softmax(logits, dim=-1)
-            code = torch.multinomial(probs, num_samples=1)  # [bsz, 1]
+            code = torch.multinomial(probs, num_samples=1)
 
             all_codes[:, step] = code
 
             # Embed predicted code -> next buffer position
-            new_embed = codec_embeds[step - 1](code)  # [batch, 1, hidden_size]
+            new_embed = codec_embeds[step - 1](code)
             proj_buf[:bsz, step + 1 : step + 2, :] = new_embed
 
-        return all_codes, proj_buf[:bsz]
+        return all_codes, proj_buf[:bsz].clone()
 
     # ------------------------------------------------------------------
     #  Weight loading
