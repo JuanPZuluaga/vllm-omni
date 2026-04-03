@@ -12,6 +12,7 @@ from typing import NamedTuple
 import librosa
 import numpy as np
 import soundfile as sf
+import torch
 import vllm
 from PIL import Image
 from vllm import SamplingParams
@@ -397,8 +398,6 @@ def main(args):
             # Convert to numpy array and ensure correct format
             # In async_chunk mode, audio may arrive as a list of chunks
             if isinstance(audio_tensor, list):
-                import torch
-
                 audio_tensor = torch.cat(
                     [(t if isinstance(t, torch.Tensor) else torch.tensor(t)).flatten() for t in audio_tensor]
                 )

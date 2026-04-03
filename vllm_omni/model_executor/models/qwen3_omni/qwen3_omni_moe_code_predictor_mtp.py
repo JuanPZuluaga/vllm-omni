@@ -389,10 +389,10 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
         self._lm_heads = list(self.lm_head)
         self._codec_embeds = list(self.model.codec_embedding)
 
-    def _ensure_buffers(self, device: torch.device, dtype: torch.dtype, min_bsz: int = 0) -> None:
-        """Pre-allocate projection buffer sized to max(max_num_seqs, min_bsz)."""
+    def _ensure_buffers(self, device: torch.device, dtype: torch.dtype) -> None:
+        """Pre-allocate projection buffer sized to max_num_seqs."""
         max_seq = self.num_code_groups + 1
-        max_bsz = max(self._vllm_config.scheduler_config.max_num_seqs, min_bsz)
+        max_bsz = self._vllm_config.scheduler_config.max_num_seqs
         if (
             self._proj_buf is not None
             and self._proj_buf.device == device
@@ -475,8 +475,8 @@ class Qwen3OmniMoeTalkerCodePredictor(nn.Module):
 
         # Lazy init
         self._ensure_pos_ids(device)
-        self._ensure_buffers(device, dtype, min_bsz=bsz)
-        self._setup_compile()
+        self._ensure_buffers(device, dtype)
+        self._setup_compile()  # triggers torch.compile + bucket warmup on first call
         self._ensure_cached_refs()
 
         proj_buf = self._proj_buf
