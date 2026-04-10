@@ -81,7 +81,17 @@ class OmniVoiceMultiModalProcessor(BaseMultiModalProcessor[OmniVoiceMultiModalPr
         # Audio tokenizer for encoding reference audio
         audio_tokenizer_path = os.path.join(model_dir, "audio_tokenizer")
         if os.path.isdir(audio_tokenizer_path):
-            from transformers import AutoFeatureExtractor, HiggsAudioV2TokenizerModel
+            try:
+                from transformers import (
+                    AutoFeatureExtractor,
+                    HiggsAudioV2TokenizerModel,
+                )
+            except ImportError as e:
+                raise ImportError(
+                    "OmniVoice voice cloning requires transformers with "
+                    "HiggsAudioV2TokenizerModel. Upgrade transformers or "
+                    "use text-only mode (no reference audio)."
+                ) from e
 
             self.audio_tokenizer = HiggsAudioV2TokenizerModel.from_pretrained(audio_tokenizer_path, device_map="cpu")
             self.feature_extractor = AutoFeatureExtractor.from_pretrained(audio_tokenizer_path)
@@ -89,8 +99,8 @@ class OmniVoiceMultiModalProcessor(BaseMultiModalProcessor[OmniVoiceMultiModalPr
         else:
             self.audio_tokenizer = None
             self.feature_extractor = None
-            logger.info(
-                "Audio tokenizer directory not found at %s, voice cloning unavailable",
+            logger.warning(
+                "audio_tokenizer not found at %s, voice cloning disabled",
                 audio_tokenizer_path,
             )
 
