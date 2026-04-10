@@ -1017,11 +1017,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         URLs, ``data:`` base64 URIs, and ``file:`` local paths (the latter
         gated by ``--allowed-local-media-path``).
         """
-        model_config = self.model_config
-        connector = MediaConnector(
-            allowed_local_media_path=model_config.allowed_local_media_path,
-            allowed_media_domains=model_config.allowed_media_domains,
-        )
+        # In diffusion mode, model_config may not be available
+        if self._diffusion_mode:
+            connector = MediaConnector()
+        else:
+            model_config = self.model_config
+            connector = MediaConnector(
+                allowed_local_media_path=model_config.allowed_local_media_path,
+                allowed_media_domains=model_config.allowed_media_domains,
+            )
         wav_np, sr = await connector.fetch_audio_async(ref_audio_str)
         wav_np = np.asarray(wav_np, dtype=np.float32)
         if wav_np.ndim > 1:
