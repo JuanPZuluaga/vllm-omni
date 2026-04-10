@@ -39,22 +39,6 @@ except ImportError:
 logger = init_logger(__name__)
 
 
-def _decode_audio_data_uri(data_uri: str) -> tuple[np.ndarray, int]:
-    """Decode a base64 ``data:`` URI to (float32 samples, sample_rate)."""
-    import base64
-    import io
-
-    import soundfile as sf
-
-    _, _, payload = data_uri.partition(",")
-    raw = base64.b64decode(payload)
-    wav, sr = sf.read(io.BytesIO(raw))
-    wav = np.asarray(wav, dtype=np.float32)
-    if wav.ndim > 1:
-        wav = np.mean(wav, axis=-1)
-    return wav, int(sr)
-
-
 def get_omnivoice_post_process_func(od_config: OmniDiffusionConfig):
     """Post-processing: convert audio tensor to numpy for WAV encoding."""
 
@@ -197,8 +181,6 @@ class OmniVoicePipeline(nn.Module, SupportAudioOutput):
         # Encode reference audio tokens if provided
         ref_audio_tokens = None
         if ref_audio is not None:
-            if isinstance(ref_audio, str):
-                ref_audio = _decode_audio_data_uri(ref_audio)
             audio_signal, sr = ref_audio
             if isinstance(audio_signal, np.ndarray):
                 audio_signal = torch.from_numpy(audio_signal).float()
