@@ -36,6 +36,8 @@ try:
 except ImportError:
     HiggsAudioV2TokenizerModel = None
 
+import torchaudio
+
 logger = init_logger(__name__)
 
 
@@ -87,17 +89,14 @@ class OmniVoicePipeline(nn.Module, SupportAudioOutput):
 
         # Audio tokenizer for voice cloning (optional)
         audio_tokenizer_path = os.path.join(self.model_path, "audio_tokenizer")
-        if os.path.isdir(audio_tokenizer_path) and HiggsAudioV2TokenizerModel is not None:
-            try:
-                self.audio_tokenizer = HiggsAudioV2TokenizerModel.from_pretrained(
-                    audio_tokenizer_path, device_map=self.device
-                ).eval()
-                logger.info("HiggsAudioV2 tokenizer loaded for voice cloning on %s", self.device)
-            except Exception as e:
-                self.audio_tokenizer = None
-                logger.warning("Audio tokenizer unavailable, voice cloning disabled: %s", e)
+        if os.path.isdir(audio_tokenizer_path):
+            self.audio_tokenizer = HiggsAudioV2TokenizerModel.from_pretrained(
+                audio_tokenizer_path, device_map=self.device
+            ).eval()
+            logger.info("HiggsAudioV2 tokenizer loaded for voice cloning on %s", self.device)
         else:
             self.audio_tokenizer = None
+            logger.info("Audio tokenizer directory not found at %s, voice cloning unavailable", audio_tokenizer_path)
 
         # Duration estimator
         self.duration_estimator = RuleDurationEstimator()
@@ -120,8 +119,6 @@ class OmniVoicePipeline(nn.Module, SupportAudioOutput):
         # Resample to tokenizer's expected sample rate
         target_sr = self.audio_tokenizer.config.sample_rate
         if sr != target_sr:
-            import torchaudio
-
             audio_signal = torchaudio.functional.resample(audio_signal, sr, target_sr)
         # Ensure mono [B, 1, samples]
         if audio_signal.dim() == 2:
@@ -181,6 +178,11 @@ class OmniVoicePipeline(nn.Module, SupportAudioOutput):
         # Encode reference audio tokens if provided
         ref_audio_tokens = None
         if ref_audio is not None:
+            if self.audio_tokenizer is None:
+                raise RuntimeError(
+                    "Reference audio provided but audio tokenizer not found. "
+                    "Ensure the model directory contains 'audio_tokenizer/' subdirectory."
+                )
             audio_signal, sr = ref_audio
             if isinstance(audio_signal, np.ndarray):
                 audio_signal = torch.from_numpy(audio_signal).float()

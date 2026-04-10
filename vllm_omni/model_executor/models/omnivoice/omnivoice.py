@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 import numpy as np
 import torch
 import torch.nn as nn
+import torchaudio
 from transformers.feature_extraction_utils import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -80,17 +81,7 @@ class OmniVoiceMultiModalProcessor(BaseMultiModalProcessor[OmniVoiceMultiModalPr
         # Audio tokenizer for encoding reference audio
         audio_tokenizer_path = os.path.join(model_dir, "audio_tokenizer")
         if os.path.isdir(audio_tokenizer_path):
-            try:
-                from transformers import (
-                    AutoFeatureExtractor,
-                    HiggsAudioV2TokenizerModel,
-                )
-            except ImportError as e:
-                raise ImportError(
-                    "OmniVoice voice cloning requires transformers with "
-                    "HiggsAudioV2TokenizerModel. Upgrade transformers or "
-                    "use text-only mode (no reference audio)."
-                ) from e
+            from transformers import AutoFeatureExtractor, HiggsAudioV2TokenizerModel
 
             self.audio_tokenizer = HiggsAudioV2TokenizerModel.from_pretrained(audio_tokenizer_path, device_map="cpu")
             self.feature_extractor = AutoFeatureExtractor.from_pretrained(audio_tokenizer_path)
@@ -98,8 +89,8 @@ class OmniVoiceMultiModalProcessor(BaseMultiModalProcessor[OmniVoiceMultiModalPr
         else:
             self.audio_tokenizer = None
             self.feature_extractor = None
-            logger.warning(
-                "audio_tokenizer not found at %s, voice cloning disabled",
+            logger.info(
+                "Audio tokenizer directory not found at %s, voice cloning unavailable",
                 audio_tokenizer_path,
             )
 
@@ -166,20 +157,19 @@ class OmniVoiceMultiModalProcessor(BaseMultiModalProcessor[OmniVoiceMultiModalPr
         if self.feature_extractor is not None:
             target_sr = self.feature_extractor.sampling_rate
             if sr != target_sr:
-                import torchaudio
-
                 audio_signal = torchaudio.functional.resample(audio_signal, sr, target_sr)
 
         # Encode reference audio to 8-codebook tokens
-        if self.audio_tokenizer is not None:
-            with torch.inference_mode():
-                ref_audio_tokens = self.audio_tokenizer.encode(audio_signal)  # [8, T_ref]
-                if ref_audio_tokens.dim() == 3:
-                    ref_audio_tokens = ref_audio_tokens.squeeze(0)  # [8, T_ref]
-        else:
+        if self.audio_tokenizer is None:
             raise RuntimeError(
-                "Audio tokenizer not available for voice cloning. Ensure audio_tokenizer/ exists in model directory."
+                "Reference audio provided but audio tokenizer not found. "
+                "Ensure the model directory contains 'audio_tokenizer/' subdirectory."
             )
+
+        with torch.inference_mode():
+            ref_audio_tokens = self.audio_tokenizer.encode(audio_signal)  # [8, T_ref]
+            if ref_audio_tokens.dim() == 3:
+                ref_audio_tokens = ref_audio_tokens.squeeze(0)  # [8, T_ref]
 
         ft = BatchFeature(
             {
