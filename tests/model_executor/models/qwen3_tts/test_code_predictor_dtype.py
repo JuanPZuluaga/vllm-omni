@@ -120,6 +120,7 @@ Qwen3TTSTalkerCodePredictorConfig = _config_mod.Qwen3TTSTalkerCodePredictorConfi
 Qwen3TTSTalkerConfig = _config_mod.Qwen3TTSTalkerConfig
 CodePredictorWrapper = _cp_mod.Qwen3TTSTalkerCodePredictorForConditionalGenerationVLLM
 CodePredictorModel = _cp_mod.Qwen3TTSTalkerCodePredictorModelVLLM
+CodePredictorWrapperConfig = _cp_mod.CodePredictorWrapperConfig
 
 
 def _make_tiny_config() -> tuple:
@@ -278,3 +279,35 @@ class TestCodePredictorModelDtype:
         output = model(inputs, pos_ids)
         assert output.dtype == torch.float32
         assert output.shape == (bsz, seq_len, 32)
+
+
+class TestCodePredictorWrapperConfig:
+    """Test wrapper configuration for different models."""
+
+    def test_omni_config(self) -> None:
+        """Qwen3-Omni uses correct wrapper config."""
+        config = CodePredictorWrapperConfig(
+            use_cuda_graphs=False,
+            use_parallel_embedding=True,
+            use_projection=False,
+            return_proj_buf=True,
+            sampling_mode="stored",
+        )
+        assert config.use_cuda_graphs is False
+        assert config.use_parallel_embedding is True
+        assert config.return_proj_buf is True
+        assert config.sampling_mode == "stored"
+
+    def test_tts_config(self) -> None:
+        """Qwen3-TTS uses correct wrapper config."""
+        config = CodePredictorWrapperConfig(
+            use_cuda_graphs=True,
+            use_parallel_embedding=False,
+            use_projection=True,
+            return_proj_buf=False,
+            sampling_mode="per_call",
+        )
+        assert config.use_cuda_graphs is True
+        assert config.use_parallel_embedding is False
+        assert config.return_proj_buf is False
+        assert config.sampling_mode == "per_call"
