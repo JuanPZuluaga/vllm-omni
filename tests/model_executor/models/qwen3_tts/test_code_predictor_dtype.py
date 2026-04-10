@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 # Direct file import to avoid vllm_omni.__init__ patch dependencies.
-_BASE = os.path.join(
+_MODELS = os.path.join(
     os.path.dirname(__file__),
     os.pardir,
     os.pardir,
@@ -29,14 +29,16 @@ _BASE = os.path.join(
     "vllm_omni",
     "model_executor",
     "models",
-    "qwen3_tts",
 )
+_BASE = os.path.join(_MODELS, "qwen3_tts")
+_COMMON = os.path.join(_MODELS, "common")
 
 
 def _load_module(name: str, filename: str):
     path = os.path.abspath(os.path.join(_BASE, filename))
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # register before exec (needed for dataclasses etc.)
     spec.loader.exec_module(mod)
     return mod
 
@@ -55,8 +57,17 @@ def _build_mock_modules() -> dict[str, object]:
     weight_utils_mock = MagicMock()
     weight_utils_mock.default_weight_loader = lambda p, w: None
 
-    pkg = types.ModuleType("vllm_omni.model_executor.models.qwen3_tts")
-    pkg.__path__ = [os.path.abspath(_BASE)]
+    tts_pkg = types.ModuleType("vllm_omni.model_executor.models.qwen3_tts")
+    tts_pkg.__path__ = [os.path.abspath(_BASE)]
+
+    common_pkg = types.ModuleType("vllm_omni.model_executor.models.common")
+    common_pkg.__path__ = [os.path.abspath(_COMMON)]
+
+    models_pkg = types.ModuleType("vllm_omni.model_executor.models")
+    models_pkg.__path__ = [os.path.abspath(_MODELS)]
+
+    vllm_parallel_mock = MagicMock()
+    vllm_parallel_mock.VocabParallelEmbedding = torch.nn.Embedding
 
     return {
         "vllm_omni": MagicMock(),
@@ -65,9 +76,11 @@ def _build_mock_modules() -> dict[str, object]:
         "vllm.config": MagicMock(),
         "vllm.config.vllm": vllm_config_mod,
         "vllm.model_executor.model_loader.weight_utils": weight_utils_mock,
+        "vllm.model_executor.layers.vocab_parallel_embedding": vllm_parallel_mock,
         "vllm_omni.model_executor": types.ModuleType("vllm_omni.model_executor"),
-        "vllm_omni.model_executor.models": types.ModuleType("vllm_omni.model_executor.models"),
-        "vllm_omni.model_executor.models.qwen3_tts": pkg,
+        "vllm_omni.model_executor.models": models_pkg,
+        "vllm_omni.model_executor.models.common": common_pkg,
+        "vllm_omni.model_executor.models.qwen3_tts": tts_pkg,
     }
 
 
@@ -83,6 +96,15 @@ def _load_target_classes():
             "configuration_qwen3_tts.py",
         )
         sys.modules["vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts"] = config_mod
+
+        # Load the shared common module (thin wrappers import from it)
+        common_cp_path = os.path.abspath(os.path.join(_COMMON, "code_predictor.py"))
+        common_spec = importlib.util.spec_from_file_location(
+            "vllm_omni.model_executor.models.common.code_predictor", common_cp_path
+        )
+        common_cp_mod = importlib.util.module_from_spec(common_spec)
+        sys.modules["vllm_omni.model_executor.models.common.code_predictor"] = common_cp_mod
+        common_spec.loader.exec_module(common_cp_mod)
 
         cp_mod = _load_module(
             "vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_code_predictor_vllm",
@@ -234,7 +256,7 @@ class TestCodePredictorModelDtype:
     def test_model_forward_float16(self) -> None:
         """Inner model forward should work in float16."""
         cp_config, _ = _make_tiny_config()
-        model = CodePredictorModel(cp_config, talker_hidden_size=32).to(torch.float16)
+        model = CodePredictorModel(cp_config, embedding_dim=32).to(torch.float16)
 
         bsz, seq_len = 1, 4
         inputs = torch.randn(bsz, seq_len, 32, dtype=torch.float16)
@@ -247,7 +269,7 @@ class TestCodePredictorModelDtype:
     def test_model_forward_float32(self) -> None:
         """Inner model forward should work in float32."""
         cp_config, _ = _make_tiny_config()
-        model = CodePredictorModel(cp_config, talker_hidden_size=32).to(torch.float32)
+        model = CodePredictorModel(cp_config, embedding_dim=32).to(torch.float32)
 
         bsz, seq_len = 1, 4
         inputs = torch.randn(bsz, seq_len, 32, dtype=torch.float32)
