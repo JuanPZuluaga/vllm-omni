@@ -7,8 +7,6 @@ Tests verify that the OmniVoice model generates valid audio when
 accessed through the standard OpenAI-compatible speech API.
 """
 
-import base64
-import io
 import os
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -17,11 +15,9 @@ os.environ["VLLM_TEST_CLEAN_GPU_MEMORY"] = "0"
 from pathlib import Path
 
 import httpx
-import numpy as np
 import pytest
-import soundfile as sf
 
-from tests.conftest import OmniServerParams
+from tests.conftest import OmniServerParams, generate_synthetic_audio
 from tests.utils import hardware_test
 
 MODEL = "k2-fsa/OmniVoice"
@@ -44,28 +40,14 @@ TEST_PARAMS = [
 MIN_AUDIO_BYTES = 5000
 
 
-def create_test_audio(duration_sec: float = 2.0, sample_rate: int = 24000) -> str:
-    """Create a test audio file and return base64-encoded data URL.
-
-    Args:
-        duration_sec: Duration of audio in seconds
-        sample_rate: Sample rate in Hz
+def _get_ref_audio_b64() -> str:
+    """Generate synthetic speech for reference audio.
 
     Returns:
         Base64 data URL string (data:audio/wav;base64,...)
     """
-    # Generate sine wave
-    t = np.linspace(0, duration_sec, int(duration_sec * sample_rate))
-    audio = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-
-    # Encode to WAV
-    buffer = io.BytesIO()
-    sf.write(buffer, audio, sample_rate, format="WAV")
-    audio_bytes = buffer.getvalue()
-
-    # Convert to base64 data URL
-    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-    return f"data:audio/wav;base64,{audio_b64}"
+    audio_data = generate_synthetic_audio(duration=2, num_channels=1, sample_rate=24000)
+    return f"data:audio/wav;base64,{audio_data['base64']}"
 
 
 def make_speech_request(
@@ -154,7 +136,7 @@ class TestOmniVoiceVoiceCloning:
     @hardware_test(res={"cuda": "L4"}, num_cards=1)
     def test_voice_clone_ref_audio_only(self, omni_server) -> None:
         """Test voice cloning with ref_audio only (x_vector mode)."""
-        ref_audio_b64 = create_test_audio(duration_sec=2.0)
+        ref_audio_b64 = _get_ref_audio_b64()
 
         response = make_voice_clone_request(
             host=omni_server.host,
@@ -175,7 +157,7 @@ class TestOmniVoiceVoiceCloning:
     @hardware_test(res={"cuda": "L4"}, num_cards=1)
     def test_voice_clone_ref_audio_and_text(self, omni_server) -> None:
         """Test voice cloning with ref_audio and ref_text (in-context mode)."""
-        ref_audio_b64 = create_test_audio(duration_sec=2.0)
+        ref_audio_b64 = _get_ref_audio_b64()
         ref_text = "This is the reference transcript."
 
         response = make_voice_clone_request(
