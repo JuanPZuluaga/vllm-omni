@@ -20,6 +20,13 @@ import pytest
 from tests.conftest import OmniServerParams, generate_synthetic_audio
 from tests.utils import hardware_test
 
+try:
+    from transformers import HiggsAudioV2TokenizerModel  # noqa: F401
+
+    _HAS_VOICE_CLONE = True
+except ImportError:
+    _HAS_VOICE_CLONE = False
+
 MODEL = "k2-fsa/OmniVoice"
 
 STAGE_CONFIG = str(
@@ -127,6 +134,7 @@ def make_voice_clone_request(
         return client.post(url, json=payload)
 
 
+@pytest.mark.skipif(not _HAS_VOICE_CLONE, reason="Voice cloning requires transformers>=5.3.0")
 @pytest.mark.parametrize("omni_server", TEST_PARAMS, indirect=True)
 class TestOmniVoiceVoiceCloning:
     """E2E tests for OmniVoice voice cloning functionality."""
