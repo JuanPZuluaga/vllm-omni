@@ -87,16 +87,16 @@ class OmniVoicePipeline(nn.Module, SupportAudioOutput):
         tokenizer_path = os.path.join(self.model_path, "tokenizer.json")
         self.tokenizer = HFTokenizer.from_file(tokenizer_path)
 
-        # Audio tokenizer for voice cloning (optional)
-        audio_tokenizer_path = os.path.join(self.model_path, "audio_tokenizer")
-        if os.path.isdir(audio_tokenizer_path):
+        # Audio tokenizer for voice cloning (requires transformers>=5.3)
+        if HiggsAudioV2TokenizerModel is not None:
+            audio_tokenizer_path = os.path.join(self.model_path, "audio_tokenizer")
             self.audio_tokenizer = HiggsAudioV2TokenizerModel.from_pretrained(
                 audio_tokenizer_path, device_map=self.device
             ).eval()
             logger.info("HiggsAudioV2 tokenizer loaded for voice cloning on %s", self.device)
         else:
             self.audio_tokenizer = None
-            logger.info("Audio tokenizer directory not found at %s, voice cloning unavailable", audio_tokenizer_path)
+            logger.warning("Voice cloning disabled (requires transformers>=5.3.0).")
 
         # Duration estimator
         self.duration_estimator = RuleDurationEstimator()
@@ -180,8 +180,7 @@ class OmniVoicePipeline(nn.Module, SupportAudioOutput):
         if ref_audio is not None:
             if self.audio_tokenizer is None:
                 raise RuntimeError(
-                    "Reference audio provided but audio tokenizer not found. "
-                    "Ensure the model directory contains 'audio_tokenizer/' subdirectory."
+                    "Voice cloning requires transformers>=5.3.0. Try: uv pip install 'transformers>=5.3.0'"
                 )
             audio_signal, sr = ref_audio
             if isinstance(audio_signal, np.ndarray):
