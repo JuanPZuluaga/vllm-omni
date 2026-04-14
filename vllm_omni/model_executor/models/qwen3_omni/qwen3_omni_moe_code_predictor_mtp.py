@@ -2,7 +2,7 @@
 
 from vllm.config import VllmConfig
 
-from vllm_omni.model_executor.models.common.code_predictor import (
+from vllm_omni.model_executor.models.common.qwen3_code_predictor import (
     CodePredictorWrapper,
     CodePredictorWrapperConfig,
 )

@@ -1,4 +1,4 @@
-"""Code Predictor -- optimized re-prefill, no KV cache.
+"""Qwen3 Code Predictor -- optimized re-prefill, no KV cache.
 
 Shared by Qwen3-Omni and Qwen3-TTS talker models.
 

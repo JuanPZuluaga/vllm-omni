@@ -102,12 +102,12 @@ def _load_target_classes(mocker: MockerFixture):
     sys.modules["vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts"] = config_mod
 
     # Load the shared common module (thin wrappers import from it)
-    common_cp_path = os.path.abspath(os.path.join(_COMMON, "code_predictor.py"))
+    common_cp_path = os.path.abspath(os.path.join(_COMMON, "qwen3_code_predictor.py"))
     common_spec = importlib.util.spec_from_file_location(
-        "vllm_omni.model_executor.models.common.code_predictor", common_cp_path
+        "vllm_omni.model_executor.models.common.qwen3_code_predictor", common_cp_path
     )
     common_cp_mod = importlib.util.module_from_spec(common_spec)
-    sys.modules["vllm_omni.model_executor.models.common.code_predictor"] = common_cp_mod
+    sys.modules["vllm_omni.model_executor.models.common.qwen3_code_predictor"] = common_cp_mod
     common_spec.loader.exec_module(common_cp_mod)
 
     cp_mod = _load_module(

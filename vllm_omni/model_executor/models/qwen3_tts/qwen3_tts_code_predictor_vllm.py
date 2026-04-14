@@ -8,7 +8,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.vllm import set_current_vllm_config
 
-from vllm_omni.model_executor.models.common.code_predictor import (
+from vllm_omni.model_executor.models.common.qwen3_code_predictor import (
     CodePredictorBaseModel,
     CodePredictorWrapper,
     CodePredictorWrapperConfig,
