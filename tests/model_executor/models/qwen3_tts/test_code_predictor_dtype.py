@@ -180,12 +180,12 @@ class TestCodePredictorDtypeAlignment:
         )
 
         # Create buffer in float16
-        predictor._ensure_buffers(torch.device("cpu"), torch.float16)
+        predictor._ensure_buffers(torch.device("cpu"), torch.float16, 4)
         assert predictor._proj_buf is not None
         assert predictor._proj_buf.dtype == torch.float16
 
         # Re-create buffer in float32 (different dtype triggers re-allocation)
-        predictor._ensure_buffers(torch.device("cpu"), torch.float32)
+        predictor._ensure_buffers(torch.device("cpu"), torch.float32, 4)
         assert predictor._proj_buf.dtype == torch.float32
 
     def test_warmup_aligns_buffer_to_model_params(self, mocker: MockerFixture, loaded_target_classes) -> None:
@@ -204,7 +204,7 @@ class TestCodePredictorDtypeAlignment:
         predictor = predictor.to(torch.float16)
 
         # Pre-create proj_buf with WRONG dtype (float32) — simulating the bug
-        predictor._ensure_buffers(torch.device("cpu"), torch.float32)
+        predictor._ensure_buffers(torch.device("cpu"), torch.float32, 2)
         assert predictor._proj_buf.dtype == torch.float32
 
         # Simulate _setup_compile having cached model dtype and compiled forward

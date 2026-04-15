@@ -399,18 +399,17 @@ class CodePredictorWrapper(nn.Module):
     #  Lazy-init helpers
     # ------------------------------------------------------------------
 
-    def _ensure_buffers(self, device: torch.device, dtype: torch.dtype) -> None:
-        """Pre-allocate projection buffer."""
+    def _ensure_buffers(self, device: torch.device, dtype: torch.dtype, bsz: int) -> None:
+        """Ensure the projection buffer can hold at least *bsz* rows."""
         max_seq = self._num_groups + 1
-        max_bsz = self._vllm_config.scheduler_config.max_num_seqs
         if (
             self._proj_buf is not None
             and self._proj_buf.device == device
             and self._proj_buf.dtype == dtype
-            and self._proj_buf.shape[0] >= max_bsz
+            and self._proj_buf.shape[0] >= bsz
         ):
             return
-        self._proj_buf = torch.zeros(max_bsz, max_seq, self._cp_hidden, dtype=dtype, device=device)
+        self._proj_buf = torch.zeros(bsz, max_seq, self._cp_hidden, dtype=dtype, device=device)
 
     def _setup_compile(self) -> None:
         """Lazily set up torch.compile with optional CUDA graph capture."""
@@ -466,7 +465,7 @@ class CodePredictorWrapper(nn.Module):
 
         # Ensure proj_buf matches model parameter dtype to avoid dtype
         # mismatch during warmup compilation (see #2385).
-        self._ensure_buffers(device, self._model_dtype)
+        self._ensure_buffers(device, self._model_dtype, max(self._bucket_sizes))
         proj_buf = self._proj_buf
 
         for bsz in self._bucket_sizes:
@@ -520,7 +519,9 @@ class CodePredictorWrapper(nn.Module):
         # so they always match model weight precision (#2385).
         self._setup_compile()
         dtype = self._model_dtype
-        self._ensure_buffers(device, dtype)
+
+        padded_bsz = self._padded_bsz(bsz)
+        self._ensure_buffers(device, dtype, padded_bsz)
 
         proj_buf = self._proj_buf
         max_seq = num_groups + 1
@@ -529,8 +530,7 @@ class CodePredictorWrapper(nn.Module):
         lm_heads = self._lm_heads_list
         codec_embeds = self._codec_embeds_list
 
-        # Pad batch to nearest bucket and zero the buffer
-        padded_bsz = self._padded_bsz(bsz)
+        # Zero the padded region of the buffer
         proj_buf[:padded_bsz].zero_()
 
         # Fill buffer positions 0 (talker hidden) & 1 (layer0 embed)
