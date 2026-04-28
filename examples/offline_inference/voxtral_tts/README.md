@@ -33,7 +33,6 @@ python3 examples/offline_inference/voxtral_tts/end2end.py \
     --text "That eerie silence after the first storm was just the calm before another round of chaos, wasn't it?"
 
 # Short debug prompt with reference audio
-# Note: Reference audio capability is not yet released.
 python3 examples/offline_inference/voxtral_tts/end2end.py \
     --write-audio \
     --model mistralai/Voxtral-4B-TTS-2603 \
