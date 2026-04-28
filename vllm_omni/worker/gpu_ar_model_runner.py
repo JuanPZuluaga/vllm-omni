@@ -161,9 +161,11 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin):
         cached = self._downstream_payload_cache.get(req_id)
         if cached is not None:
             return cached
-        # Conservative default: keep payload if marker is missing.
         final_stage_id = self._request_final_stage_id(req_id)
-        needs_payload = final_stage_id is None or final_stage_id > 0
+        has_downstream = final_stage_id is None or final_stage_id > 0
+        # Single-stage non-text AR models (VoxCPM2) need pooler_output for the API.
+        produces_non_text_output = self.vllm_config.model_config.engine_output_type != "text"
+        needs_payload = has_downstream or produces_non_text_output
         self._downstream_payload_cache[req_id] = needs_payload
         return needs_payload
 
