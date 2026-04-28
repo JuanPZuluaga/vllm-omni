@@ -382,7 +382,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if self._tts_executor is not None:
             self._tts_executor.shutdown(wait=False, cancel_futures=True)
             self._tts_executor = None
-        self._speaker_cache.clear()
+        for name in list(self.uploaded_speakers.keys()):
+            self._speaker_cache.clear(name)
 
     def _find_tts_stage(self):
         """Find and return the TTS stage config, or None if not found."""
@@ -585,8 +586,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         info = self.uploaded_speakers.get(voice_lower)
         return int(info.get("created_at", 0)) if info else 0
 
-    async def _build_voxcpm2_prompt(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
-        """Build prefill prompt for VoxCPM2 TTS (`prompt_token_ids` padded to full prefill length)."""
+    async def _build_voxcpm2_prompt(
+        self,
+        request: OpenAICreateSpeechRequest,
+        *,
+        uploaded_ref: tuple[np.ndarray, int] | None = None,
+    ) -> dict[str, Any]:
+        """Build prefill prompt for VoxCPM2 TTS (`prompt_token_ids` padded to full prefill length).
+
+        ``uploaded_ref`` supplies the audio for uploaded voices (no explicit
+        ``ref_audio`` in the request) so prefill length includes it.
+        """
         from vllm_omni.model_executor.models.voxcpm2.voxcpm2_talker import build_voxcpm2_prompt
 
         self._voxcpm2_encode("")  # lazy-init tokenizer + split_map
@@ -594,6 +604,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         ref_sr = None
         if request.ref_audio is not None:
             ref_audio, ref_sr = await self._resolve_ref_audio(request.ref_audio)
+        elif uploaded_ref is not None:
+            wav_np, ref_sr = uploaded_ref
+            ref_audio = wav_np.tolist()
         # VoxCPM2 uses a text-prefix convention for style/voice instructions:
         # the native CLI wraps the instruction in parens and prepends it.
         # Mirror that here so `instructions` works through the OpenAI endpoint.
@@ -953,6 +966,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         if not isinstance(embedding, list) or not embedding:
             raise ValueError("'speaker_embedding' must be a non-empty list of numbers")
+
+        if len(embedding) > 4096:
+            raise ValueError("'speaker_embedding' exceeds maximum length (4096 elements)")
 
         if not all(isinstance(x, (int, float)) for x in embedding):
             raise ValueError("'speaker_embedding' must contain only numeric values")
@@ -1566,9 +1582,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             ro = getattr(res, "request_output", None)
             mm = getattr(ro, "multimodal_output", None) if ro else None
         if not mm:
-            if ro is None:
-                ro = getattr(res, "request_output", None)
-            outputs = getattr(ro, "outputs", None) if ro else None
+            # MultimodalOutputProcessor attaches mm_accumulated on per-completion outputs.
+            container = res if hasattr(res, "outputs") else ro
+            outputs = getattr(container, "outputs", None) if container is not None else None
             if outputs:
                 for completion_output in outputs:
                     completion_mm = getattr(completion_output, "multimodal_output", None)
@@ -1974,27 +1990,21 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             validation_error = self._validate_tts_request(request)
             if validation_error:
                 raise ValueError(validation_error)
+            uploaded_ref: tuple[np.ndarray, int] | None = None
             if request.voice:
                 voice_lower = request.voice.lower()
                 if voice_lower not in self.uploaded_speakers and voice_lower not in self.supported_speakers:
                     all_voices = sorted(self.uploaded_speakers.keys() | self.supported_speakers)
                     raise ValueError(f"Invalid voice '{request.voice}'. Supported: {', '.join(all_voices) or 'none'}")
-            prompt = await self._build_voxcpm2_prompt(request)
+                if voice_lower in self.uploaded_speakers and request.ref_audio is None:
+                    uploaded_ref = self._load_uploaded_audio(voice_lower)
+            prompt = await self._build_voxcpm2_prompt(request, uploaded_ref=uploaded_ref)
             tts_params = {}
             if request.voice:
                 voice_lower = request.voice.lower()
                 additional = prompt.setdefault("additional_information", {})
                 additional["voice_name"] = voice_lower
                 additional["voice_created_at"] = self._voice_created_at(voice_lower)
-                if (
-                    voice_lower in self.uploaded_speakers
-                    and "reference_audio" not in additional
-                    and "prompt_audio" not in additional
-                ):
-                    loaded = self._load_uploaded_audio(voice_lower)
-                    if loaded is not None:
-                        wav_np, sr = loaded
-                        additional["reference_audio"] = [[wav_np.tolist(), sr]]
         elif self._is_tts:
             validation_error = self._validate_tts_request(request)
             if validation_error:
