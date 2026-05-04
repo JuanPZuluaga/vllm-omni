@@ -734,11 +734,12 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         voice_lower = request.voice.lower()
         if voice_lower not in self.uploaded_speakers:
-            if self._tts_model_type in ("cosyvoice3", "fish_tts", "omnivoice"):
+            if self._tts_model_type in ("cosyvoice3", "fish_tts", "omnivoice", "moss_tts_nano"):
                 label = {
                     "cosyvoice3": "CosyVoice3",
                     "fish_tts": "Fish Speech",
                     "omnivoice": "OmniVoice",
+                    "moss_tts_nano": "MOSS-TTS-Nano",
                 }.get(self._tts_model_type, self._tts_model_type)
                 return (
                     f"Unknown voice '{request.voice}'. {label} has no "
@@ -1928,7 +1929,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         # Resolve uploaded voice for non-Qwen3 models.
         # Qwen3 TTS has its own uploaded voice handling in _build_tts_params().
-        if self._tts_model_type in ("fish_tts", "cosyvoice3"):
+        if self._tts_model_type in ("fish_tts", "cosyvoice3", "moss_tts_nano"):
             err = self._apply_uploaded_speaker(request)
             if err:
                 raise ValueError(err)
