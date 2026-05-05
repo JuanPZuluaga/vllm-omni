@@ -248,12 +248,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     data[k] = int(data[k])
                 except ValueError:
                     logger.warning(
-                        "Speaker metadata %r in %s is not a valid int (got %r); falling back to 0",
+                        "Speaker metadata %r in %s is not a valid int (got %r); leaving as string",
                         k,
                         file_path,
                         data[k],
                     )
-                    data[k] = 0
         data["file_path"] = file_path
         return data
 
