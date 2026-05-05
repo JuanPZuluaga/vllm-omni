@@ -160,6 +160,14 @@ def _sanitize_filename(filename: str) -> str:
     return sanitized
 
 
+def _validate_speaker_name(name: str) -> str:
+    """Trim and reject empty / path-separator / NUL / reserved voice names."""
+    trimmed = (name or "").strip()
+    if not trimmed or trimmed in (".", "..") or any(c in trimmed for c in "/\\\x00"):
+        raise ValueError(f"Invalid voice name {name!r}: must be non-empty, no path separators or NUL")
+    return trimmed
+
+
 def _validate_path_within_directory(file_path: Path, directory: Path) -> bool:
     """Validate that file_path is within the specified directory.
 
@@ -196,6 +204,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self._ref_audio_data_url_cache: dict[str, str] = {}
         self._speaker_cache = get_speaker_cache()
         self._last_upload_ts = 0
+        self._upload_lock = asyncio.Lock()
         self._restore_uploaded_speakers()
         logger.info(
             "Speaker storage: dir=%s, max_speakers=%d, restored=%d",
@@ -238,7 +247,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 try:
                     data[k] = int(data[k])
                 except ValueError:
-                    pass
+                    logger.warning(
+                        "Speaker metadata %r in %s is not a valid int (got %r); falling back to 0",
+                        k,
+                        file_path,
+                        data[k],
+                    )
+                    data[k] = 0
         data["file_path"] = file_path
         return data
 
@@ -790,7 +805,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             except Exception as e:
                 logger.warning("Failed to remove previous file for '%s': %s", name, e)
         self._speaker_cache.clear(voice_name_lower)
-        logger.warning("Speaker '%s' re-uploaded; previous cache and file overwritten", name)
+        logger.info("Speaker '%s' re-uploaded; previous cache and file overwritten", name)
 
     async def upload_voice(
         self,
@@ -802,6 +817,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         speaker_description: str | None = None,
     ) -> dict:
         """Upload a new voice sample."""
+        name = _validate_speaker_name(name)
         # Normalize optional strings: treat whitespace-only as absent
         if ref_text is not None:
             ref_text = ref_text.strip() or None
@@ -853,82 +869,76 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if mime_type not in allowed_mime_types:
             raise ValueError(f"Unsupported MIME type: {mime_type}. Allowed: {allowed_mime_types}")
 
-        voice_name_lower = name.lower()
-        self._evict_existing_upload(voice_name_lower, name)
-
-        self._check_upload_cap()
-
-        # Sanitize name and consent to prevent path traversal
-        sanitized_name = _sanitize_filename(name)
-        sanitized_consent = _sanitize_filename(consent)
-
-        # Generate filename with sanitized inputs
-        timestamp = self._next_upload_timestamp()
-        file_suffix = Path(audio_file.filename).suffix
-        file_ext = file_suffix[1:] if file_suffix and len(file_suffix) > 1 else "wav"
-        # Sanitize file extension as well
-        sanitized_ext = _sanitize_filename(file_ext)
-        if not sanitized_ext or sanitized_ext == "file":
-            sanitized_ext = "wav"
-
-        filename = f"{sanitized_name}_{sanitized_consent}_{timestamp}.safetensors"
-        file_path = self.uploaded_speakers_dir / filename
-
-        # Double-check that the path is within the upload directory
-        if not _validate_path_within_directory(file_path, self.uploaded_speakers_dir):
-            raise ValueError("Invalid file path: potential path traversal attack detected")
-
-        # Read content and decode + validate duration before saving
+        # Read content before acquiring the lock; decode happens inside.
         content = await audio_file.read()
-        try:
-            wav_np, sr = sf.read(io.BytesIO(content))
-        except Exception as e:
-            raise ValueError(f"Could not decode audio file: {e}")
-        duration = len(wav_np) / sr if sr > 0 else 0.0
-        if duration < _REF_AUDIO_MIN_DURATION:
-            raise ValueError(
-                f"Reference audio too short ({duration:.1f}s). "
-                f"At least {_REF_AUDIO_MIN_DURATION:.0f}s of clear speech is required."
-            )
-        if duration > _REF_AUDIO_MAX_DURATION:
-            raise ValueError(
-                f"Reference audio too long ({duration:.1f}s). "
-                f"Maximum {_REF_AUDIO_MAX_DURATION:.0f}s supported — use a shorter clip."
-            )
 
-        # Build speaker metadata (used both in-memory and persisted to safetensors header).
-        speaker_data: dict[str, Any] = {
-            "name": name,
-            "voice_name_lower": voice_name_lower,
-            "consent": consent,
-            "file_path": str(file_path),
-            "created_at": timestamp,
-            "mime_type": mime_type,
-            "original_filename": audio_file.filename,
-            "file_size": file_size,
-            "sample_rate": int(sr),
-            "ref_text": ref_text,
-            "embedding_source": "audio",
-        }
-        if speaker_description:
-            speaker_data["speaker_description"] = speaker_description
+        async with self._upload_lock:
+            voice_name_lower = name.lower()
+            self._evict_existing_upload(voice_name_lower, name)
+            self._check_upload_cap()
 
-        try:
-            from safetensors.torch import save_file
-        except ImportError as exc:
-            raise ValueError("safetensors is required for voice upload") from exc
-        try:
-            audio_tensor = torch.from_numpy(np.asarray(wav_np, dtype=np.float32)).contiguous()
-            save_file(
-                {"audio": audio_tensor},
-                str(file_path),
-                metadata=self._speaker_metadata_to_header(speaker_data),
-            )
-        except Exception as e:
-            raise ValueError(f"Failed to save voice file: {e}")
+            sanitized_name = _sanitize_filename(name)
+            sanitized_consent = _sanitize_filename(consent)
+            timestamp = self._next_upload_timestamp()
+            file_suffix = Path(audio_file.filename).suffix
+            file_ext = file_suffix[1:] if file_suffix and len(file_suffix) > 1 else "wav"
+            sanitized_ext = _sanitize_filename(file_ext)
+            if not sanitized_ext or sanitized_ext == "file":
+                sanitized_ext = "wav"
 
-        self.uploaded_speakers[voice_name_lower] = speaker_data
-        self.supported_speakers.add(voice_name_lower)
+            filename = f"{sanitized_name}_{sanitized_consent}_{timestamp}.safetensors"
+            file_path = self.uploaded_speakers_dir / filename
+            if not _validate_path_within_directory(file_path, self.uploaded_speakers_dir):
+                raise ValueError("Invalid file path: potential path traversal attack detected")
+
+            try:
+                wav_np, sr = sf.read(io.BytesIO(content))
+            except Exception as e:
+                raise ValueError(f"Could not decode audio file: {e}")
+            duration = len(wav_np) / sr if sr > 0 else 0.0
+            if duration < _REF_AUDIO_MIN_DURATION:
+                raise ValueError(
+                    f"Reference audio too short ({duration:.1f}s). "
+                    f"At least {_REF_AUDIO_MIN_DURATION:.0f}s of clear speech is required."
+                )
+            if duration > _REF_AUDIO_MAX_DURATION:
+                raise ValueError(
+                    f"Reference audio too long ({duration:.1f}s). "
+                    f"Maximum {_REF_AUDIO_MAX_DURATION:.0f}s supported — use a shorter clip."
+                )
+
+            speaker_data: dict[str, Any] = {
+                "name": name,
+                "voice_name_lower": voice_name_lower,
+                "consent": consent,
+                "file_path": str(file_path),
+                "created_at": timestamp,
+                "mime_type": mime_type,
+                "original_filename": audio_file.filename,
+                "file_size": file_size,
+                "sample_rate": int(sr),
+                "ref_text": ref_text,
+                "embedding_source": "audio",
+            }
+            if speaker_description:
+                speaker_data["speaker_description"] = speaker_description
+
+            try:
+                from safetensors.torch import save_file
+            except ImportError as exc:
+                raise ValueError("safetensors is required for voice upload") from exc
+            try:
+                audio_tensor = torch.from_numpy(np.asarray(wav_np, dtype=np.float32)).contiguous()
+                save_file(
+                    {"audio": audio_tensor},
+                    str(file_path),
+                    metadata=self._speaker_metadata_to_header(speaker_data),
+                )
+            except Exception as e:
+                raise ValueError(f"Failed to save voice file: {e}")
+
+            self.uploaded_speakers[voice_name_lower] = speaker_data
+            self.supported_speakers.add(voice_name_lower)
 
         logger.info("Uploaded new voice '%s' with consent ID '%s'", name, consent)
 
@@ -960,6 +970,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         Returns:
             dict with voice information.
         """
+        name = _validate_speaker_name(name)
         try:
             embedding = json.loads(embedding_json)
         except (json.JSONDecodeError, TypeError) as exc:
@@ -982,44 +993,45 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if dim_err is not None:
             raise ValueError(dim_err)
 
-        voice_name_lower = name.lower()
-        self._evict_existing_upload(voice_name_lower, name)
-        self._check_upload_cap()
+        async with self._upload_lock:
+            voice_name_lower = name.lower()
+            self._evict_existing_upload(voice_name_lower, name)
+            self._check_upload_cap()
 
-        sanitized_name = _sanitize_filename(name)
-        sanitized_consent = _sanitize_filename(consent)
-        timestamp = self._next_upload_timestamp()
+            sanitized_name = _sanitize_filename(name)
+            sanitized_consent = _sanitize_filename(consent)
+            timestamp = self._next_upload_timestamp()
 
-        tensor = torch.tensor(embedding, dtype=torch.float32)
-        filename = f"{sanitized_name}_{sanitized_consent}_{timestamp}.safetensors"
-        file_path = self.uploaded_speakers_dir / filename
-        if not _validate_path_within_directory(file_path, self.uploaded_speakers_dir):
-            raise ValueError("Invalid file path: potential path traversal attack detected")
+            tensor = torch.tensor(embedding, dtype=torch.float32)
+            filename = f"{sanitized_name}_{sanitized_consent}_{timestamp}.safetensors"
+            file_path = self.uploaded_speakers_dir / filename
+            if not _validate_path_within_directory(file_path, self.uploaded_speakers_dir):
+                raise ValueError("Invalid file path: potential path traversal attack detected")
 
-        speaker_data: dict[str, Any] = {
-            "name": name,
-            "voice_name_lower": voice_name_lower,
-            "consent": consent,
-            "file_path": str(file_path),
-            "created_at": timestamp,
-            "mime_type": "application/x-safetensors",
-            "original_filename": filename,
-            "embedding_source": "direct",
-            "embedding_dim": emb_dim,
-        }
-        try:
-            from safetensors.torch import save_file
-        except ImportError as exc:
-            raise ValueError("safetensors is required for embedding upload") from exc
-        save_file(
-            {"speaker_embedding": tensor},
-            str(file_path),
-            metadata=self._speaker_metadata_to_header(speaker_data),
-        )
-        speaker_data["file_size"] = file_path.stat().st_size
+            speaker_data: dict[str, Any] = {
+                "name": name,
+                "voice_name_lower": voice_name_lower,
+                "consent": consent,
+                "file_path": str(file_path),
+                "created_at": timestamp,
+                "mime_type": "application/x-safetensors",
+                "original_filename": filename,
+                "embedding_source": "direct",
+                "embedding_dim": emb_dim,
+            }
+            try:
+                from safetensors.torch import save_file
+            except ImportError as exc:
+                raise ValueError("safetensors is required for embedding upload") from exc
+            save_file(
+                {"speaker_embedding": tensor},
+                str(file_path),
+                metadata=self._speaker_metadata_to_header(speaker_data),
+            )
+            speaker_data["file_size"] = file_path.stat().st_size
 
-        self.uploaded_speakers[voice_name_lower] = speaker_data
-        self.supported_speakers.add(voice_name_lower)
+            self.uploaded_speakers[voice_name_lower] = speaker_data
+            self.supported_speakers.add(voice_name_lower)
 
         logger.info("Uploaded voice '%s' from speaker embedding (%d-dim)", name, emb_dim)
 
@@ -1041,26 +1053,25 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         Returns:
             bool: True if successful, False if voice doesn't exist
         """
-        voice_name_lower = name.lower()
+        async with self._upload_lock:
+            voice_name_lower = name.lower()
 
-        if voice_name_lower not in self.uploaded_speakers:
-            logger.warning("Voice '%s' not found", name)
-            return False
+            if voice_name_lower not in self.uploaded_speakers:
+                logger.warning("Voice '%s' not found", name)
+                return False
 
-        speaker_info = self.uploaded_speakers.pop(voice_name_lower)
-        self.supported_speakers.discard(voice_name_lower)
-        self._ref_audio_data_url_cache.pop(voice_name_lower, None)
+            speaker_info = self.uploaded_speakers.pop(voice_name_lower)
+            self.supported_speakers.discard(voice_name_lower)
+            self._ref_audio_data_url_cache.pop(voice_name_lower, None)
 
-        # Clean up audio file on disk
-        file_path = speaker_info.get("file_path")
-        if file_path:
-            try:
-                Path(file_path).unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning("Failed to delete audio file for '%s': %s", name, e)
+            file_path = speaker_info.get("file_path")
+            if file_path:
+                try:
+                    Path(file_path).unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning("Failed to delete audio file for '%s': %s", name, e)
 
-        # Clear cached voice artifacts to prevent stale data and memory leaks
-        self._speaker_cache.clear(voice_name_lower)
+            self._speaker_cache.clear(voice_name_lower)
 
         logger.info("Deleted voice '%s'", name)
         return True
@@ -1282,9 +1293,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                             "the reference audio) unless 'x_vector_only_mode' is enabled"
                         )
             else:
-                # Handle the case where request.voice is NOT None
-                pass
-                # voice is not None
                 voice_lower = request.voice.lower()
                 if voice_lower in self.uploaded_speakers:
                     # Check if data file exists for uploaded speaker
@@ -1966,14 +1974,22 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if request.instructions:
                 prompt["instruct"] = request.instructions
         elif self._tts_model_type == "voxcpm2":
+            # voxcpm2 doesn't use `_apply_uploaded_speaker` because the prompt builder needs the
+            # raw waveform tuple for prefill-length accounting, not a base64 data URL.
             uploaded_ref: tuple[np.ndarray, int] | None = None
             if request.voice:
                 voice_lower = request.voice.lower()
                 if voice_lower not in self.uploaded_speakers and voice_lower not in self.supported_speakers:
                     all_voices = sorted(self.uploaded_speakers.keys() | self.supported_speakers)
                     raise ValueError(f"Invalid voice '{request.voice}'. Supported: {', '.join(all_voices) or 'none'}")
-                if voice_lower in self.uploaded_speakers and request.ref_audio is None:
-                    uploaded_ref = self._load_uploaded_audio(voice_lower)
+                if voice_lower in self.uploaded_speakers:
+                    if self.uploaded_speakers[voice_lower].get("embedding_source") == "direct":
+                        raise ValueError(
+                            f"Uploaded voice '{request.voice}' uses a speaker embedding (Qwen3-only). "
+                            f"Re-upload with an audio file for VoxCPM2."
+                        )
+                    if request.ref_audio is None:
+                        uploaded_ref = self._load_uploaded_audio(voice_lower)
             prompt = await self._build_voxcpm2_prompt(request, uploaded_ref=uploaded_ref)
             tts_params = {}
             if request.voice:
@@ -1997,6 +2013,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 tts_params = {}
             elif self._tts_model_type == "moss_tts_nano":
                 tts_params = await self._build_moss_tts_params(request)
+                if request.voice:
+                    voice_lower = request.voice.lower()
+                    tts_params["voice_name"] = [voice_lower]
+                    tts_params["voice_created_at"] = [self._voice_created_at(voice_lower)]
                 prompt = tokens_input(prompt_token_ids=[1])
                 prompt["additional_information"] = tts_params
             else:
