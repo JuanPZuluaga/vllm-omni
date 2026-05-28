@@ -166,6 +166,13 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             "is_finished": is_finished,
             "is_segment_finished": is_segment_finished,
         }
+        # Block when the in-flight queue is full; bail on shutdown.
+        if self._save_semaphore is not None:
+            while not self.stop_event.is_set():
+                if self._save_semaphore.acquire(timeout=0.05):
+                    break
+            else:
+                return
         self._pending_save_reqs.append(task)
         with self._save_cond:
             self._save_cond.notify()

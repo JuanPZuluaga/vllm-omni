@@ -148,6 +148,8 @@ class OmniEngineArgs(EngineArgs):
     # in __post_init__ based on worker_type (ar/generation), so None is safe here.
     enable_sleep_mode: bool = False
     omni: bool = False
+    # Max in-flight chunk-transfer save tasks before producers block. 0 disables.
+    save_queue_max_size: int = 0
 
     @classmethod
     def _add_omni_specific_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -350,6 +352,7 @@ class OmniEngineArgs(EngineArgs):
             omni_kv_config=self.omni_kv_config,
             task_type=self.task_type,
             has_sampling_extra_args=self.has_sampling_extra_args,
+            save_queue_max_size=self.save_queue_max_size,
         )
         return omni_config
 

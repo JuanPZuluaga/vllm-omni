@@ -137,6 +137,8 @@ class OmniModelConfig(ModelConfig):
     task_type: str | None = None
     enable_sleep_mode: bool = False
     has_sampling_extra_args: bool = False
+    # Max in-flight chunk-transfer save tasks before producers block. 0 disables.
+    save_queue_max_size: int = 0
 
     @property
     def registry(self):

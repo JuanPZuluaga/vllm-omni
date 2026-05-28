@@ -1040,6 +1040,7 @@ class TestDeployConfigLoading:
             "max_num_seqs",
             "mm_processor_cache_gb",
             "profiler_config",
+            "save_queue_max_size",
             "skip_mm_profiling",
             "subtalker_sampling_params",
             "tensor_parallel_size",

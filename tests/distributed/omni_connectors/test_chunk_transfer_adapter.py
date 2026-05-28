@@ -50,6 +50,7 @@ def build_adapter(monkeypatch, mocker: MockerFixture):
         stage_id: int = 1,
         model_mode: str = "ar",
         max_num_seqs: int = 2,
+        save_queue_max_size: int = 0,
         connector_extra: dict | None = None,
     ):
         connector = mocker.MagicMock()
@@ -58,6 +59,8 @@ def build_adapter(monkeypatch, mocker: MockerFixture):
         connector.get.return_value = None
         connector.put.return_value = (True, 1, {})
 
+        cap = save_queue_max_size
+
         def _fake_base_init(self, config):
             self.config = config
             self._pending_load_reqs = deque()
@@ -65,6 +68,7 @@ def build_adapter(monkeypatch, mocker: MockerFixture):
             self._cancelled_load_reqs = set()
             self._pending_save_reqs = deque()
             self._finished_save_reqs = set()
+            self._save_semaphore = threading.Semaphore(cap) if cap > 0 else None
             self.stop_event = threading.Event()
             self._recv_cond = threading.Condition()
             self._save_cond = threading.Condition()
@@ -1094,3 +1098,87 @@ def test_deferred_finish_not_finished_still_emits_output(mocker: MockerFixture):
     assert eco.outputs[0].finish_reason == "stop"
     assert eco.outputs[0].kv_transfer_params is None
     assert scheduler._pending_finish_reqs == []
+
+
+def test_save_queue_disabled_by_default(build_adapter):
+    adapter, _ = build_adapter(stage_id=1, save_queue_max_size=0)
+    adapter.custom_process_next_stage_input_func = lambda **kwargs: {"x": [1], "finished": False}
+    adapter.save_async(pooling_output=None, request=_req("r0", RequestStatus.WAITING, external_req_id="e0"))
+
+    assert adapter._save_semaphore is None
+    assert len(adapter._pending_save_reqs) == 1
+
+
+def test_save_queue_blocks_when_full(build_adapter):
+    adapter, _ = build_adapter(stage_id=1, save_queue_max_size=2)
+    adapter.custom_process_next_stage_input_func = lambda **kwargs: {"x": [1], "finished": False}
+    for i in range(2):
+        adapter.save_async(
+            pooling_output=None,
+            request=_req(f"r{i}", RequestStatus.WAITING, external_req_id=f"e{i}"),
+        )
+
+    blocked = threading.Thread(
+        target=adapter.save_async,
+        kwargs={
+            "pooling_output": None,
+            "request": _req("r2", RequestStatus.WAITING, external_req_id="e2"),
+        },
+        daemon=True,
+    )
+    blocked.start()
+    blocked.join(timeout=0.2)
+    assert blocked.is_alive()
+    assert len(adapter._pending_save_reqs) == 2
+
+    adapter._save_semaphore.release()
+    blocked.join(timeout=1.0)
+    assert not blocked.is_alive()
+    assert len(adapter._pending_save_reqs) == 3
+
+
+def test_save_queue_stop_event_unblocks_producer(build_adapter):
+    adapter, _ = build_adapter(stage_id=1, save_queue_max_size=1)
+    adapter.custom_process_next_stage_input_func = lambda **kwargs: {"x": [1], "finished": False}
+    adapter.save_async(pooling_output=None, request=_req("r0", RequestStatus.WAITING, external_req_id="e0"))
+
+    done = threading.Event()
+
+    def producer():
+        adapter.save_async(pooling_output=None, request=_req("r1", RequestStatus.WAITING, external_req_id="e1"))
+        done.set()
+
+    t = threading.Thread(target=producer, daemon=True)
+    t.start()
+    assert not done.wait(timeout=0.2)
+
+    adapter.stop_event.set()
+    assert done.wait(timeout=1.0)
+    t.join(timeout=1.0)
+    assert len(adapter._pending_save_reqs) == 1
+
+
+def test_save_queue_releases_slot_on_send_exception(build_adapter):
+    adapter, _ = build_adapter(stage_id=1, save_queue_max_size=1)
+    adapter.custom_process_next_stage_input_func = lambda **kwargs: {"x": [1], "finished": False}
+
+    def _boom(task):
+        raise RuntimeError("send failed")
+
+    adapter._send_single_request = _boom
+
+    # Acquires the only slot and enqueues the task.
+    adapter.save_async(pooling_output=None, request=_req("r0", RequestStatus.WAITING, external_req_id="e0"))
+    assert not adapter._save_semaphore.acquire(blocking=False)
+
+    loop = threading.Thread(target=adapter.save_loop, daemon=True)
+    loop.start()
+    try:
+        # save_loop pops the task, _send_single_request raises, the finally clause still releases.
+        assert adapter._save_semaphore.acquire(timeout=1.0)
+    finally:
+        adapter.stop_event.set()
+        with adapter._save_cond:
+            adapter._save_cond.notify_all()
+        loop.join(timeout=1.0)
+    assert not loop.is_alive()

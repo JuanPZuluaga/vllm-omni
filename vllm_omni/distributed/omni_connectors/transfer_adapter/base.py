@@ -31,6 +31,9 @@ class OmniTransferAdapterBase:
         self._pending_save_reqs = deque()
         # Requests that have successfully saved data
         self._finished_save_reqs = set()
+        # Bound the in-flight save queue; 0 disables backpressure.
+        cap = int(getattr(config, "save_queue_max_size", 0) or 0)
+        self._save_semaphore = threading.Semaphore(cap) if cap > 0 else None
 
         self.stop_event = threading.Event()
         self._recv_cond = threading.Condition()
@@ -91,6 +94,9 @@ class OmniTransferAdapterBase:
                     self._send_single_request(task)
                 except Exception as e:
                     logger.warning(f"Error saving data for {task.get('request_id')}: {e}")
+                finally:
+                    if self._save_semaphore is not None:
+                        self._save_semaphore.release()
 
             with self._save_cond:
                 if not self._pending_save_reqs and not self.stop_event.is_set():

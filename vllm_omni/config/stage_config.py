@@ -517,6 +517,8 @@ class DeployConfig:
     data_parallel_size: int | None = None
     pipeline_parallel_size: int | None = None
     custom_voice_dir: str | None = None
+    # Cap in-flight chunk-transfer save tasks; 0 disables the bound.
+    save_queue_max_size: int = 0
 
 
 _STAGE_RESERVED_KEYS = frozenset(
@@ -695,6 +697,7 @@ def load_deploy_config(path: str | Path) -> DeployConfig:
         "data_parallel_size",
         "pipeline_parallel_size",
         "custom_voice_dir",
+        "save_queue_max_size",
     ):
         if name in raw_dict:
             kwargs[name] = raw_dict[name]
@@ -817,6 +820,7 @@ _PIPELINE_WIDE_ENGINE_FIELDS: tuple[str, ...] = (
     "data_parallel_size",
     "pipeline_parallel_size",
     "custom_voice_dir",
+    "save_queue_max_size",
 )
 
 
