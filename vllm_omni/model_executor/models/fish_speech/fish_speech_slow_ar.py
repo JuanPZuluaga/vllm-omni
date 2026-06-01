@@ -254,7 +254,7 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
         if self.talker_mtp_graph_safe:
             self.fast_ar._disable_compile_for_graph = True
 
-        # Constant logit mask: allow only semantic tokens + im_end.
+        # Additive logit bias: 0 on allowed (semantic + im_end), -inf elsewhere — avoids per-step ~mask + masked_fill.
         vocab = int(self.text_config.vocab_size)
         semantic_mask = torch.zeros((vocab,), dtype=torch.bool)
         lo = self._semantic_begin_id
@@ -265,13 +265,44 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
         im_end_id = 151645
         if im_end_id < vocab:
             semantic_mask[im_end_id] = True
-        self.register_buffer("_semantic_allowed_mask", semantic_mask, persistent=False)
+        semantic_logit_bias = torch.where(
+            semantic_mask,
+            torch.zeros((), dtype=torch.float32),
+            torch.full((), float("-inf"), dtype=torch.float32),
+        )
+        self.register_buffer("_semantic_logit_bias", semantic_logit_bias, persistent=False)
+        # Per-dtype cast of the bias, cached to avoid re-casting each step; {0, -inf} casts exactly.
+        self._semantic_logit_bias_cast: dict[torch.dtype, torch.Tensor] = {}
 
         # In-memory LRU cache for DAC-encoded reference audio codes.
         self._speaker_cache = get_speaker_cache()
 
         # Tokeniser (lazy).
         self._tokenizer = None
+
+        # Cached codebook-offset vectors per (q, device, dtype) - rebuilt every talker_mtp step otherwise.
+        self._codebook_offsets_cache: dict[tuple[int, torch.device, torch.dtype], torch.Tensor] = {}
+
+        # Cached zero "text_step" tensor for the mtp_inputs tuple (talker_mtp ignores this slot).
+        self._mtp_text_step_zeros_cache: dict[torch.device, torch.Tensor] = {}
+
+    def _get_codebook_offsets(self, q: int, device: torch.device, dtype: torch.dtype = torch.long) -> torch.Tensor:
+        cache = self.__dict__.setdefault("_codebook_offsets_cache", {})
+        key = (q, device, dtype)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        offsets = torch.arange(q, device=device, dtype=dtype) * self._codebook_size
+        cache[key] = offsets
+        return offsets
+
+    def _get_mtp_text_step_zeros(self, device: torch.device) -> torch.Tensor:
+        cache = self.__dict__.setdefault("_mtp_text_step_zeros_cache", {})
+        cached = cache.get(device)
+        if cached is None:
+            cached = torch.zeros(1, self.text_config.hidden_size, device=device, dtype=torch.bfloat16)
+            cache[device] = cached
+        return cached
 
     def _fix_rope_style(self) -> None:
         """Replace NeoX-style RoPE with interleaved (GPT-J) style.
@@ -325,8 +356,13 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
         if logits is None:
             return None
 
-        # Mask to semantic tokens + im_end only.
-        logits = logits.masked_fill(~self._semantic_allowed_mask, float("-inf"))
+        # Mask to semantic tokens + im_end via precomputed additive bias (cached per dtype).
+        cache = self.__dict__.setdefault("_semantic_logit_bias_cast", {})
+        bias = cache.get(logits.dtype)
+        if bias is None or bias.device != logits.device:
+            bias = self._semantic_logit_bias.to(device=logits.device, dtype=logits.dtype)
+            cache[logits.dtype] = bias
+        logits = logits + bias
         return logits
 
     # -------------------- Omni multimodal output plumbing --------------------
@@ -475,7 +511,7 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
         info_update = {
             "mtp_inputs": (
                 last_hidden.to(device=dev, dtype=torch.bfloat16).reshape(1, -1),
-                torch.zeros(1, self.text_config.hidden_size, device=dev, dtype=torch.bfloat16),
+                self._get_mtp_text_step_zeros(dev),
             ),
         }
         return input_ids, inputs_embeds_out, info_update
@@ -636,10 +672,9 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
             return embeds
 
         q = min(int(ref_codes_fq.shape[1]), self._num_codebooks)
-        offsets = (torch.arange(q, device=embeds.device, dtype=torch.long) * self._codebook_size).unsqueeze(0)
+        offsets = self._get_codebook_offsets(q, embeds.device).unsqueeze(0)
         ref_codes_slice = ref_codes_fq[:frames, :q]
-        if bool((ref_codes_slice < 0).any().item()):
-            logger.warning("Fish Speech structured clone saw negative DAC codes; clamping them to zero")
+        # Negative entries are clamped below; skip the .any().item() D2H gate.
         code_with_offset = ref_codes_slice.clamp(min=0) + offsets
         codebook_sum = self.codebook_embeddings(code_with_offset).sum(dim=1).to(dtype=embeds.dtype)
 
@@ -693,18 +728,19 @@ class FishSpeechSlowARForConditionalGeneration(nn.Module):
             generator=kwargs.get("generator"),
         )  # [B, num_codebooks]
 
-        # Add codebook embeddings to the input embedding (from preprocess).
-        # This ensures the Slow AR sees codes from FastAR(hidden_{t-1}).
-        inputs_embeds_out = input_embeds.reshape(bsz, -1).clone()
+        # Fold the clone()+where into one fused linear combo: drops an alloc, stays graph-friendly.
+        base_embeds = input_embeds.reshape(bsz, -1)
 
         semantic_mask = (input_ids[:, 0] >= self._semantic_begin_id) & (input_ids[:, 0] <= self._semantic_end_id)
         semantic_codes = audio_codes.clamp(min=0, max=self._codebook_size - 1)
-        offsets = (
-            torch.arange(self._num_codebooks, device=dev, dtype=semantic_codes.dtype) * self._codebook_size
-        ).unsqueeze(0)
+        offsets = self._get_codebook_offsets(self._num_codebooks, dev, dtype=semantic_codes.dtype).unsqueeze(0)
         codebook_sum = self.codebook_embeddings(semantic_codes + offsets).sum(dim=1).to(dtype=torch.bfloat16)
-        norm_embeds = (inputs_embeds_out + codebook_sum) / math.sqrt(self._num_codebooks + 1)
-        inputs_embeds_out = torch.where(semantic_mask.unsqueeze(-1), norm_embeds, inputs_embeds_out)
+        # scale_mask: 1/sqrt(N+1) at semantic positions, 1.0 elsewhere. codebook_scale: 1/sqrt(N+1) at semantic, 0 else.
+        sqrt_inv = 1.0 / math.sqrt(self._num_codebooks + 1)
+        mask_f = semantic_mask.unsqueeze(-1).to(dtype=base_embeds.dtype)
+        codebook_scale = mask_f * sqrt_inv
+        scale_mask = mask_f * (sqrt_inv - 1.0) + 1.0
+        inputs_embeds_out = base_embeds * scale_mask + codebook_sum * codebook_scale
 
         return inputs_embeds_out, audio_codes.to(dtype=torch.long)
 

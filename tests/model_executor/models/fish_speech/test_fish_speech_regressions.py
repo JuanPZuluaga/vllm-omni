@@ -273,3 +273,64 @@ def test_structured_voice_clone_prefill_adds_full_codebooks_with_decode_scale(mo
     expected_1 = (torch.tensor([4.0, 5.0, 6.0]) + torch.tensor([30.0, 40.0, 0.0])) / math.sqrt(3.0)
     assert torch.allclose(prefill[2].to(dtype=torch.float32), expected_0, atol=2e-2, rtol=0)
     assert torch.allclose(prefill[3].to(dtype=torch.float32), expected_1, atol=2e-2, rtol=0)
+
+
+def _make_logit_bias_model():
+    _, _, FishSpeechSlowARForConditionalGeneration = _fish_speech_regression_modules()
+    model = object.__new__(FishSpeechSlowARForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    vocab = 12
+    semantic_mask = torch.zeros((vocab,), dtype=torch.bool)
+    semantic_mask[3:6] = True  # allowed semantic range
+    semantic_mask[10] = True  # stand-in for im_end
+    bias = torch.where(
+        semantic_mask,
+        torch.zeros((), dtype=torch.float32),
+        torch.full((), float("-inf"), dtype=torch.float32),
+    )
+    model._semantic_logit_bias = bias
+    model._semantic_logit_bias_cast = {}
+
+    def _identity_logits(lm_head, hidden):
+        del lm_head
+        return hidden
+
+    model.logits_processor = _identity_logits
+    model.lm_head = None
+    return model, bias, vocab
+
+
+def test_compute_logits_bias_cache_matches_naive_and_masks():
+    _, _, FishSpeechSlowARForConditionalGeneration = _fish_speech_regression_modules()
+    model, bias, vocab = _make_logit_bias_model()
+
+    for dtype in (torch.float32, torch.bfloat16, torch.float16):
+        logits_in = torch.randn(2, vocab, dtype=dtype)
+        out = FishSpeechSlowARForConditionalGeneration.compute_logits(model, logits_in)
+        naive = logits_in + bias.to(dtype)
+        big = -1e30
+        assert torch.equal(out.nan_to_num(neginf=big), naive.nan_to_num(neginf=big))
+        # Disallowed positions must be -inf; allowed positions untouched.
+        assert torch.isinf(out[:, 0]).all() and (out[:, 0] < 0).all()
+        assert torch.equal(out[:, 3:6], logits_in[:, 3:6])
+        # The per-dtype cast must be cached (same tensor object reused).
+        cached = model._semantic_logit_bias_cast[dtype]
+        out2 = FishSpeechSlowARForConditionalGeneration.compute_logits(model, logits_in)
+        assert model._semantic_logit_bias_cast[dtype] is cached
+        assert torch.equal(out.nan_to_num(neginf=big), out2.nan_to_num(neginf=big))
+
+
+def test_mtp_text_step_zeros_cached_and_zero():
+    _, _, FishSpeechSlowARForConditionalGeneration = _fish_speech_regression_modules()
+    model = object.__new__(FishSpeechSlowARForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.text_config = SimpleNamespace(hidden_size=7)
+    model._mtp_text_step_zeros_cache = {}
+
+    dev = torch.device("cpu")
+    t1 = FishSpeechSlowARForConditionalGeneration._get_mtp_text_step_zeros(model, dev)
+    t2 = FishSpeechSlowARForConditionalGeneration._get_mtp_text_step_zeros(model, dev)
+    assert t1 is t2  # reused, not reallocated
+    assert t1.shape == (1, 7)
+    assert t1.dtype == torch.bfloat16
+    assert bool((t1 == 0).all())

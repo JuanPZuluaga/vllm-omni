@@ -110,6 +110,10 @@ class FishSpeechDACDecoder(nn.Module):
             "dac_max_batch",
         )
 
+        # Constant CPU output tensors (sample rate + empty audio) reused across forwards.
+        self._sr_tensor = torch.tensor(self._output_sample_rate, dtype=torch.int32)
+        self._empty_audio = torch.zeros((0,), dtype=torch.float32)
+
     def _decode_codes(
         self,
         codes_bqf: torch.Tensor,
@@ -151,17 +155,26 @@ class FishSpeechDACDecoder(nn.Module):
 
             base_make_mask = module.make_mask
             base_make_window_mask = module.make_window_limited_mask
-            mask_cache: dict[int, torch.Tensor] = {}
-            window_mask_cache: dict[int, torch.Tensor] = {}
+            # Key by (max_length, device) and store on-device so forward's mask.to() is a no-op.
+            mask_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
+            window_mask_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
 
-            def make_mask_cached(max_length: int, x_lens: torch.Tensor | None = None, *, _orig=base_make_mask):
+            def make_mask_cached(
+                max_length: int,
+                x_lens: torch.Tensor | None = None,
+                *,
+                _orig=base_make_mask,
+                _module=module,
+                _cache=mask_cache,
+            ):
                 if x_lens is not None:
                     return _orig(max_length, x_lens)
-                key = int(max_length)
-                cached = mask_cache.get(key)
+                device = next(_module.parameters(), torch.empty(0)).device
+                key = (int(max_length), device)
+                cached = _cache.get(key)
                 if cached is None:
-                    cached = _orig(max_length, x_lens)
-                    mask_cache[key] = cached
+                    cached = _orig(max_length, x_lens).to(device)
+                    _cache[key] = cached
                 return cached
 
             def make_window_mask_cached(
@@ -169,14 +182,17 @@ class FishSpeechDACDecoder(nn.Module):
                 x_lens: torch.Tensor | None = None,
                 *,
                 _orig=base_make_window_mask,
+                _module=module,
+                _cache=window_mask_cache,
             ):
                 if x_lens is not None:
                     return _orig(max_length, x_lens)
-                key = int(max_length)
-                cached = window_mask_cache.get(key)
+                device = next(_module.parameters(), torch.empty(0)).device
+                key = (int(max_length), device)
+                cached = _cache.get(key)
                 if cached is None:
-                    cached = _orig(max_length, x_lens)
-                    window_mask_cache[key] = cached
+                    cached = _orig(max_length, x_lens).to(device)
+                    _cache[key] = cached
                 return cached
 
             module.make_mask = make_mask_cached
@@ -301,9 +317,12 @@ class FishSpeechDACDecoder(nn.Module):
         Codes are codebook-major: [cb0_f0, cb0_f1, ..., cb0_fN, cb1_f0, ...].
         """
         q = self._num_codebooks
-        sr_val = self._output_sample_rate
-        sr_tensor = torch.tensor(sr_val, dtype=torch.int32)
-        empty = torch.zeros((0,), dtype=torch.float32)
+        sr_tensor = getattr(self, "_sr_tensor", None)
+        if sr_tensor is None:
+            sr_tensor = torch.tensor(self._output_sample_rate, dtype=torch.int32)
+        empty = getattr(self, "_empty_audio", None)
+        if empty is None:
+            empty = torch.zeros((0,), dtype=torch.float32)
 
         self._ensure_codec_loaded()
         assert self._codec is not None
@@ -420,14 +439,20 @@ class FishSpeechDACDecoder(nn.Module):
             batch_size = len(group)
             first_codes = group[0][1]
             feature_lengths = torch.tensor(actual_frames, device=first_codes.device, dtype=torch.long)
-            codes_bqf = torch.zeros(
-                (batch_size, q, target_frames),
-                device=first_codes.device,
-                dtype=torch.long,
-            )
-            for row, (_, codes_qf) in enumerate(group):
-                frame_count = int(codes_qf.shape[1])
-                codes_bqf[row, :, :frame_count] = codes_qf
+            # Skip the zero-pad buffer + per-row copy unless lengths differ.
+            if batch_size == 1:
+                codes_bqf = first_codes.unsqueeze(0)
+            elif all(frames == target_frames for frames in actual_frames):
+                codes_bqf = torch.stack([codes_qf for _, codes_qf in group], dim=0)
+            else:
+                codes_bqf = torch.zeros(
+                    (batch_size, q, target_frames),
+                    device=first_codes.device,
+                    dtype=torch.long,
+                )
+                for row, (_, codes_qf) in enumerate(group):
+                    frame_count = int(codes_qf.shape[1])
+                    codes_bqf[row, :, :frame_count] = codes_qf
 
             with torch.amp.autocast("cuda", enabled=False):
                 wav_batch, audio_lengths = self._decode_codes(codes_bqf, feature_lengths)
@@ -469,7 +494,10 @@ class FishSpeechDACDecoder(nn.Module):
                     )
                     continue
             if wav.shape[0] > 0:
-                audios[idx] = wav.to(dtype=torch.float32).reshape(-1)
+                # Output stays fp32; skip the cast (and its copy) when already fp32.
+                if wav.dtype != torch.float32:
+                    wav = wav.to(dtype=torch.float32)
+                audios[idx] = wav.reshape(-1)
 
         return OmniOutput(
             text_hidden_states=None,

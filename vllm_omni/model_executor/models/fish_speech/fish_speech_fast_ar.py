@@ -555,12 +555,19 @@ class FishSpeechFastAR(nn.Module):
                     scaled = scaled.masked_fill(scaled < topk_vals[:, -1:], float("-inf"))
                 if top_p < 1.0:
                     sorted_logits, sorted_indices = torch.sort(scaled, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    sorted_indices_to_remove = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= top_p
+                    # cumulative - probs == exclusive cumsum; bit-identical to two-softmax form.
+                    sorted_probs = F.softmax(sorted_logits, dim=-1)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                    sorted_indices_to_remove = (cumulative_probs - sorted_probs) >= top_p
                     sorted_logits[sorted_indices_to_remove] = float("-inf")
                     scaled = sorted_logits.scatter(1, sorted_indices, sorted_logits)
                 probs = F.softmax(scaled, dim=-1)
-                next_ids = torch.multinomial(probs, num_samples=1, generator=generator)
+                # Exponential-max draw: distribution-equivalent to multinomial (not bit-identical),
+                # no GPU->CPU sync. Filtered tokens have probs==0 and exponential_ never returns 0,
+                # so 0/q==0 (never NaN) and they are never selected.
+                q = torch.empty_like(probs)
+                q.exponential_(generator=generator)
+                next_ids = probs.div_(q).argmax(dim=-1, keepdim=True)
             else:
                 next_ids = logits.argmax(dim=-1, keepdim=True)
 
