@@ -470,6 +470,9 @@ class CosyVoice3Model(
             # KV cache is now managed externally by vLLM's PagedAttention
             # No need for self.llm_cache
             self.model = self.talker
+            # Reused -inf buffer for compute_logits vocab padding; avoids per-step alloc.
+            self._padded_logits_max_bsz = getattr(vllm_config.scheduler_config, "max_num_seqs", 32)
+            self._padded_logits_buf: torch.Tensor | None = None
         elif self.model_stage == "cosyvoice3_code2wav":
             # Initialize code2wav stage (flow matching + vocoder)
             from vllm_omni.model_executor.models.cosyvoice3.cosyvoice3_code2wav import CosyVoice3Code2Wav
@@ -722,6 +725,29 @@ class CosyVoice3Model(
             vocab_size = self.config.vocab_size
             pad_size = vocab_size - logits.size(-1)
             if pad_size > 0:
+                n = logits.size(-1)
+                bsz = logits.size(0) if logits.dim() == 2 else 1
+                buf = self._padded_logits_buf
+                if (
+                    logits.dim() == 2
+                    and bsz <= self._padded_logits_max_bsz
+                    and buf is not None
+                    and buf.dtype == logits.dtype
+                    and buf.device == logits.device
+                    and buf.size(-1) == vocab_size
+                ):
+                    # Re-pad in place; tail [n:] stays -inf, head [:n] gets overwritten.
+                    buf[:bsz, :n].copy_(logits)
+                    return buf[:bsz]
+                if logits.dim() == 2 and bsz <= self._padded_logits_max_bsz:
+                    self._padded_logits_buf = torch.full(
+                        (self._padded_logits_max_bsz, vocab_size),
+                        float("-inf"),
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    )
+                    self._padded_logits_buf[:bsz, :n].copy_(logits)
+                    return self._padded_logits_buf[:bsz]
                 pad_shape = logits.shape[:-1] + (pad_size,)
                 pad = logits.new_full(pad_shape, float("-inf"))
                 logits = torch.cat([logits, pad], dim=-1)

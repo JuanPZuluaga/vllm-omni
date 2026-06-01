@@ -11,6 +11,8 @@ This module contains the code2wav (token-to-waveform) stage which uses:
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,6 +20,7 @@ from omegaconf import DictConfig
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.models.cosyvoice3_audio.cosyvoice3_dit import DiT
+from vllm_omni.model_executor.models.common.snake_activation import SnakeBeta
 from vllm_omni.model_executor.models.cosyvoice3.code2wav_core.cfm import (
     CausalConditionalCFM,
     CausalMaskedDiffWithDiT,
@@ -43,6 +46,13 @@ class CosyVoice3Code2Wav(nn.Module):
     def __init__(self, config: CosyVoice3Config):
         super().__init__()
         self.config = config
+
+        # TF32 (fp32 DiT/HiFiGAN): not bit-identical; opt-in, set COSYVOICE3_TF32=1 to enable.
+        if os.environ.get("COSYVOICE3_TF32", "0") != "0" and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
+            logger.info("CosyVoice3 code2wav TF32 enabled")
 
         # Build flow matching components
         pre_lookahead_layer = PreLookaheadLayer(**config.flow["pre_lookahead_layer"])
@@ -317,3 +327,16 @@ class CosyVoice3Code2Wav(nn.Module):
         self.hift.load_state_dict(hift_state_dict, strict=True)
         self.hift.to(device).eval()
         logger.info(f"Loaded hift weights from {hift_path}")
+
+        # Materialize Snake caches now that weights are on device, off the first-chunk hot path.
+        self.precompute_snake_caches()
+
+    def precompute_snake_caches(self) -> None:
+        """Precompute exp(alpha)/inv-beta for all Snake activations (``Snake`` subclasses ``SnakeBeta``)."""
+        count = 0
+        for module in self.modules():
+            if isinstance(module, SnakeBeta):
+                module.precompute_exp_cache()
+                count += 1
+        if count > 0:
+            logger.info("Precomputed exp caches for %d Snake activations", count)

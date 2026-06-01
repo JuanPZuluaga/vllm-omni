@@ -46,6 +46,12 @@ def _get_hann_window(win_size: int, device_str: str) -> torch.Tensor:
     return torch.hann_window(win_size).to(torch.device(device_str))
 
 
+@lru_cache(maxsize=8)
+def _get_resampler(orig_freq: int, new_freq: int) -> torchaudio.transforms.Resample:
+    # Resample builds an FIR kernel at init; cache by (sr, sr) so load_wav doesn't rebuild per call.
+    return torchaudio.transforms.Resample(orig_freq=orig_freq, new_freq=new_freq)
+
+
 def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin, fmax, center=False):
     device_str = str(y.device)
     mel = _get_mel_basis(
@@ -101,7 +107,7 @@ def load_wav(wav, target_sr, min_sr=16000):
                 f"Minimum required: {min_sr} Hz, target: {target_sr} Hz. "
                 f"Please provide audio with sample rate >= {min_sr} Hz."
             )
-        speech = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sr)(speech)
+        speech = _get_resampler(int(sample_rate), int(target_sr))(speech)
 
     speech = speech.to(dtype=torch.float32)
     return speech
@@ -267,7 +273,9 @@ def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
                  [0, 0, 1, 1, 1]]
     """
     batch_size = lengths.size(0)
-    max_len = max_len if max_len > 0 else lengths.max().item()
+    # Single-length input has a trivial max; avoid the .max().item() host sync.
+    if max_len <= 0:
+        max_len = int(lengths[0]) if lengths.numel() == 1 else int(lengths.max().item())
     seq_range = torch.arange(0, max_len, dtype=torch.int64, device=lengths.device)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
     seq_length_expand = lengths.unsqueeze(-1)

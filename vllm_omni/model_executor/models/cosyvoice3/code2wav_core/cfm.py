@@ -54,7 +54,16 @@ class ConditionalCFM(BASECFM):
 
     @torch.inference_mode()
     def forward(
-        self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, prompt_len=0, cache=torch.zeros(1, 80, 0, 2)
+        self,
+        mu,
+        mask,
+        n_timesteps,
+        temperature=1.0,
+        spks=None,
+        cond=None,
+        prompt_len=0,
+        cache=torch.zeros(1, 80, 0, 2),
+        mask_all_valid: bool | None = None,
     ):
         """Forward diffusion
 
@@ -87,9 +96,11 @@ class ConditionalCFM(BASECFM):
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
         if self.t_scheduler == "cosine":
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
-        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), cache
+        return self.solve_euler(
+            z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond, mask_all_valid=mask_all_valid
+        ), cache
 
-    def solve_euler(self, x, t_span, mu, mask, spks, cond):
+    def solve_euler(self, x, t_span, mu, mask, spks, cond, mask_all_valid: bool | None = None):
         """
         Fixed euler solver for ODEs.
         Args:
@@ -107,7 +118,7 @@ class ConditionalCFM(BASECFM):
         t, _, dt = t_span[0], t_span[-1], t_span[1] - t_span[0]
         t = t.unsqueeze(dim=0)
 
-        sol = []
+        # Only the final Euler step is returned, so keep a single running x (no per-step list).
 
         # Do not use concat, it may cause memory format changed and trt infer with wrong results!
         # NOTE when flow run in amp mode, x.dtype is float32, which cause nan in trt fp16
@@ -118,28 +129,31 @@ class ConditionalCFM(BASECFM):
         t_in = torch.zeros([2], device=x.device, dtype=spks.dtype)
         spks_in = torch.zeros([2, 80], device=x.device, dtype=spks.dtype)
         cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=spks.dtype)
+        # mask/mu/spks/cond are loop-invariant; row 1 stays the zeroed CFG "dropped condition",
+        # so hoisting these writes out of the loop is bit-identical.
+        mask_in[:] = mask
+        mu_in[0] = mu
+        spks_in[0] = spks
+        cond_in[0] = cond
         for step in range(1, len(t_span)):
             # Classifier-Free Guidance inference introduced in VoiceBox
             x_in[:] = x
-            mask_in[:] = mask
-            mu_in[0] = mu
             t_in[:] = t.unsqueeze(0)
-            spks_in[0] = spks
-            cond_in[0] = cond
-            dphi_dt = self.forward_estimator(x_in, mask_in, mu_in, t_in, spks_in, cond_in)
+            dphi_dt = self.forward_estimator(
+                x_in, mask_in, mu_in, t_in, spks_in, cond_in, mask_all_valid=mask_all_valid
+            )
             dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
             dphi_dt = (1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt
             x = x + dt * dphi_dt
             t = t + dt
-            sol.append(x)
             if step < len(t_span) - 1:
                 dt = t_span[step + 1] - t
 
-        return sol[-1].float()
+        return x.float()
 
-    def forward_estimator(self, x, mask, mu, t, spks, cond):
+    def forward_estimator(self, x, mask, mu, t, spks, cond, mask_all_valid: bool | None = None):
         if isinstance(self.estimator, torch.nn.Module):
-            return self.estimator(x, mask, mu, t, spks, cond)
+            return self.estimator(x, mask, mu, t, spks, cond, mask_all_valid=mask_all_valid)
         else:
             # TensorRT estimator: bind raw device pointers. The flow runs in
             # fp32 but the engine may have fp16 I/O (strongly-typed fp16 engine),
@@ -187,7 +201,17 @@ class CausalConditionalCFM(ConditionalCFM):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
 
     @torch.inference_mode()
-    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, streaming: bool = False):
+    def forward(
+        self,
+        mu,
+        mask,
+        n_timesteps,
+        temperature=1.0,
+        spks=None,
+        cond=None,
+        streaming: bool = False,
+        mask_all_valid: bool | None = None,
+    ):
         """Forward diffusion
 
         Args:
@@ -221,7 +245,9 @@ class CausalConditionalCFM(ConditionalCFM):
         if self.t_scheduler == "cosine":
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
 
-        return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), None
+        return self.solve_euler(
+            z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond, mask_all_valid=mask_all_valid
+        ), None
 
 
 class CausalMaskedDiffWithDiT(torch.nn.Module):
@@ -323,7 +349,8 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
 
         conds = conds.transpose(1, 2)
 
-        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]))).to(h)
+        # Mask spans the full [0, mel_len1 + mel_len2) with no padding, so mask_all_valid=True below.
+        mask = (~make_pad_mask(torch.tensor([mel_len1 + mel_len2]), max_len=mel_len1 + mel_len2)).to(h)
         feat, _ = self.decoder(
             mu=h.transpose(1, 2).contiguous(),
             mask=mask.unsqueeze(1),
@@ -331,6 +358,7 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
             cond=conds,
             n_timesteps=max(1, int(n_timesteps)),
             streaming=streaming,
+            mask_all_valid=True,
         )
 
         feat = feat[:, :, mel_len1:]

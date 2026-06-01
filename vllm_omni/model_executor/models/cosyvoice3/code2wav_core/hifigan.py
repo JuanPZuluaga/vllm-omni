@@ -463,7 +463,12 @@ class HiFTGenerator(nn.Module):
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
-        self.stft_window = torch.from_numpy(get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32))
+        # Non-persistent buffer: moves with the module via .to(device) but stays out of state_dict (strict=True intact).
+        self.register_buffer(
+            "stft_window",
+            torch.from_numpy(get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)),
+            persistent=False,
+        )
         self.f0_predictor = f0_predictor
 
     def remove_weight_norm(self):
@@ -667,7 +672,12 @@ class CausalHiFTGenerator(HiFTGenerator):
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
         self.reflection_pad = nn.ReflectionPad1d((1, 0))
-        self.stft_window = torch.from_numpy(get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32))
+        # Non-persistent buffer: moves with the module via .to(device) but stays out of state_dict (strict=True intact).
+        self.register_buffer(
+            "stft_window",
+            torch.from_numpy(get_window("hann", istft_params["n_fft"], fftbins=True).astype(np.float32)),
+            persistent=False,
+        )
         self.conv_pre_look_right = conv_pre_look_right
         self.f0_predictor = f0_predictor
 

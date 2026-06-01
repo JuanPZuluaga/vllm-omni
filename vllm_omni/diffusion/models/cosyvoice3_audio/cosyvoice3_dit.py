@@ -369,6 +369,9 @@ class DiT(nn.Module):
         self.input_embed = InputEmbedding(mel_dim, mu_dim, dim, spk_dim)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
+        # Cache rope tuples by seq_len; constant across a solve_euler loop, so this skips a per-step recompute.
+        self._rope_cache: dict[int, tuple] = {}
+        self._rope_cache_cap: int = 16
 
         self.dim = dim
         self.depth = depth
@@ -384,7 +387,7 @@ class DiT(nn.Module):
         self.static_chunk_size = static_chunk_size
         self.num_decoding_left_chunks = num_decoding_left_chunks
 
-    def forward(self, x, mask, mu, t, spks=None, cond=None):
+    def forward(self, x, mask, mu, t, spks=None, cond=None, mask_all_valid: bool | None = None):
         x = x.transpose(1, 2)
         mu = mu.transpose(1, 2)
         cond = cond.transpose(1, 2)
@@ -397,15 +400,30 @@ class DiT(nn.Module):
         t = self.time_embed(t)
         x = self.input_embed(x, cond, mu, spks.squeeze(1))
 
-        rope = self.rotary_embed.forward_from_seq_len(seq_len)
+        rope = self._rope_cache.get(seq_len)
+        if rope is None:
+            rope = self.rotary_embed.forward_from_seq_len(seq_len)
+            # Evict oldest (insertion-ordered) once the cap is hit.
+            if len(self._rope_cache) >= self._rope_cache_cap:
+                self._rope_cache.pop(next(iter(self._rope_cache)))
+            self._rope_cache[seq_len] = rope
 
         if self.long_skip_connection is not None:
             residual = x
 
-        attn_mask = mask.bool().repeat(1, x.size(1), 1).unsqueeze(dim=1)
+        # mask_all_valid: caller's host-side promise that every position is valid; when set,
+        # skip the mask (the per-block masked_fill is a no-op). None => fall back to a device reduction.
+        if mask_all_valid is None:
+            mask_all_valid = bool(torch.all(mask.bool()))
+
+        if mask_all_valid:
+            block_mask = None
+        else:
+            mask_bool = mask.bool()
+            block_mask = mask_bool[:, 0, :] if mask_bool.dim() == 3 else mask_bool
 
         for block in self.transformer_blocks:
-            x = block(x, t, mask=attn_mask.bool(), rope=rope)
+            x = block(x, t, mask=block_mask, rope=rope)
 
         if self.long_skip_connection is not None:
             x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
